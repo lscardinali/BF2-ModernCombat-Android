@@ -16,6 +16,8 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <thread>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -55,7 +57,10 @@ constexpr uint32_t kStableFrames = 30;             // unchanged this long: moved
 constexpr uint32_t kWatchAfterFrames = 30;
 
 auto* Mem() { return rex::system::kernel_state()->memory(); }
-inline uint8_t* Virt(uint32_t a) { return Mem()->TranslateVirtual(a); }
+inline uint8_t* Virt(uint32_t a) {
+  static uint8_t* const base = Mem()->virtual_membase();
+  return base + a + rex::memory::detail::PhysicalHostOffset(a);
+}
 inline uint32_t Be32(const uint8_t* p) {
   uint32_t v;
   std::memcpy(&v, p, 4);
@@ -134,7 +139,7 @@ float4 ps_present(FsOut i) : SV_Target {
 // The entry points that take the place of the port's geometry shaders (gs_rect, gs_point). The translated vertex shader
 // is renamed xvmain; xsys[6].y is where the draw's guest indices start in xvmem.
 const char kRectEntry[] = R"(
-XVSOut main(uint id : SV_VertexID) {
+XVSOut xventry(uint id) {
   uint xbase = asuint(xsys[6].y) + (id / 6u) * 12u;
   XVSOut v[3];
   v[0] = xvmain(xvmem.Load(xbase));
@@ -157,7 +162,7 @@ XVSOut main(uint id : SV_VertexID) {
 }
 )";
 const char kPointEntry[] = R"(
-XVSOut main(uint id : SV_VertexID) {
+XVSOut xventry(uint id) {
   XVSOut o = xvmain(xvmem.Load(asuint(xsys[6].y) + (id / 6u) * 4u));
   float2 size = o.pts.x > 0.0 ? o.pts.xx : xsys[5].zw;
   float2 h = size * 0.5 * xsys[1].zw * o.pos.w;
@@ -169,6 +174,44 @@ XVSOut main(uint id : SV_VertexID) {
   return o;
 }
 )";
+
+// The varyings a pixel shader reads: Xenos shaders pass 16 registers, and a tile-based GPU stores and interpolates every
+// one of them. The registers of a pixel shader start out as its inputs, so anything above its highest register is unused.
+uint32_t PixelInputs(const std::string& hlsl) {
+  if (hlsl.find("r[(") != std::string::npos) return 16;  // relative addressing
+  size_t body = hlsl.find("float ps = 0.0;");
+  uint32_t top = 0;
+  for (size_t at = hlsl.find("r[", body); at != std::string::npos; at = hlsl.find("r[", at + 2)) {
+    if (at > 0 && (std::isalnum(uint8_t(hlsl[at - 1])) || hlsl[at - 1] == '_')) continue;
+    top = std::max<uint32_t>(top, uint32_t(std::atoi(hlsl.c_str() + at + 2)));
+  }
+  return std::clamp<uint32_t>(top + 1, 1, 16);
+}
+
+// Xenos multiplies with 0 * x = 0 even for inf and NaN: four compares and selects per multiply, the bulk of many shaders.
+std::string PlainMultiply(std::string hlsl) {
+  const std::pair<const char*, const char*> kFrom[] = {
+      {"float xmul(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }", "float xmul(float a, float b) { return a * b; }"},
+      {"float4 xmul(float4 a, float4 b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }", "float4 xmul(float4 a, float4 b) { return a * b; }"}};
+  for (const auto& [from, to] : kFrom) {
+    size_t at = hlsl.find(from);
+    if (at != std::string::npos) hlsl.replace(at, std::strlen(from), to);
+  }
+  return hlsl;
+}
+
+std::string TrimPixelInputs(std::string hlsl, uint32_t inputs) {
+  const std::string decl = "float4 o[16] : TEXCOORD0;\n  float4 pts : TEXCOORD16;";
+  size_t at = hlsl.find(decl);
+  if (at == std::string::npos) return hlsl;
+  hlsl.replace(at, decl.size(), "float4 o[" + std::to_string(inputs) + "] : TEXCOORD0;\n  float4 pts : TEXCOORD" + std::to_string(inputs) + ";");
+  at = hlsl.find("for (int ii = 0; ii < ");
+  if (at != std::string::npos) {
+    size_t end = hlsl.find(';', at + 22);
+    hlsl.replace(at + 22, end - (at + 22), std::to_string(inputs));
+  }
+  return hlsl;
+}
 
 // --- Renderer state ----------------------------------------------------------------------------
 
@@ -242,7 +285,7 @@ struct HostTex {
 };
 
 struct VsEntry {
-  VkShaderModule module[3] = {};  // by VsVariant, made when first used
+  VkShaderModule module[3][17] = {};  // by VsVariant and varyings handed on, made when first used
   std::string hlsl;
   ShaderInfo info;
   uint64_t key = 0;
@@ -251,6 +294,7 @@ struct PsEntry {
   VkShaderModule module = VK_NULL_HANDLE;
   ShaderInfo info;
   uint64_t key = 0;
+  uint32_t inputs = 16;  // varyings it reads
 };
 
 struct Targets {
@@ -545,7 +589,7 @@ class Renderer {
   };
   std::unordered_map<BindingKey, BindingMemo, BindingKeyHash> binding_memo_;
   bool ReadUcode(uint32_t object, bool pixel, std::vector<uint32_t>& out);
-  VkShaderModule VsModule(VsEntry* e, VsVariant v);
+  VkShaderModule VsModule(VsEntry* e, VsVariant v, uint32_t varyings);
 
   HostRT* GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, bool depth);
   bool CurrentTargets(uint32_t device, Targets& t);
@@ -576,8 +620,27 @@ class Renderer {
 
   VkPipeline GetPipeline(const PipelineKey& k);
   VkPipeline UtilPipeline(VkShaderModule ps, VkFormat format);
-  VkDescriptorSet AllocSet(VkDescriptorSetLayout layout);
-  void Present(Resolved* r);
+  VkDescriptorSet AllocSet(VkDescriptorSetLayout layout, uint32_t slot);
+  // What the presenting thread needs of a finished frame. Mali's present waits for the GPU to finish the frame: on its
+  // own thread that wait does not hold the game, and a frame costs the longer of CPU and GPU instead of their sum.
+  struct PresentJob {
+    uint32_t slot = 0;
+    VkImageView view = VK_NULL_HANDLE;
+    uint32_t used_w = 0, used_h = 0, tex_w = 1, tex_h = 1;
+    bool bgra = false, linear = true;
+  };
+  void Present(const PresentJob& job);
+  void PresentThread();
+  void QueuePresent(const PresentJob& job);
+  void WaitPresented(uint32_t slot);
+  void WaitAllPresented();
+  std::thread present_thread_;
+  std::mutex present_mutex_;
+  std::condition_variable present_cv_, presented_cv_;
+  std::vector<PresentJob> present_queue_;
+  bool present_pending_[vk::kFramesInFlight] = {};
+  VkPipeline present_pipeline_ = VK_NULL_HANDLE;
+  bool low_quality_ = false;  // no anisotropy, nearest mips, the game's multiply without its 0 * x rule
   void SavePipelineCache();
   // user/capture holds a frame number: that frame's draws are logged and its targets written to user/capture_*.bin
   void CaptureCopies(VkCommandBuffer cmd);
@@ -603,6 +666,7 @@ class Renderer {
   uint32_t frame_draws_ = 0, frame_skipped_ = 0, frame_passes_ = 0;
   uint32_t last_front_base_ = 0;
   uint32_t pipelines_saved_ = 0;
+  double wait_ms_ = 0;  // waiting for the GPU and the display, since the last log
 
   // host-visible rings: slot frame_index of each
   VkBuffer vertex_ = VK_NULL_HANDLE, uniform_ = VK_NULL_HANDLE, index_ = VK_NULL_HANDLE;
@@ -697,6 +761,7 @@ bool Renderer::Init() {
   const bool low_memory = ram_mb <= 4096;
   scale_ = low_memory ? 0.5f : 1.0f;
   max_texture_ = low_memory ? 256 : 1024;
+  low_quality_ = low_memory;
   texture_budget_ = VkDeviceSize(low_memory ? 192 : 768) << 20;
   if (std::ifstream f(g_user_dir / "scale"); f) f >> scale_;
   if (std::ifstream f(g_user_dir / "max_texture"); f) f >> max_texture_;
@@ -737,15 +802,56 @@ bool Renderer::Init() {
   if (capture_frame_) REXLOG_INFO("bf2native: capturing frame {}", capture_frame_);
   dump_hlsl_ = capture_frame_ != 0;
   if (watch_.Start()) REXLOG_INFO("bf2native: write watch on");
+  present_pipeline_ = UtilPipeline(util_present_, c.swap_format);
+  present_thread_ = std::thread([this] { PresentThread(); });
   BeginFrame();
   CreateFallbacks();
   REXLOG_INFO("bf2native: Vulkan renderer on {}", c.props.deviceName);
   return true;
 }
 
+void Renderer::QueuePresent(const PresentJob& job) {
+  {
+    std::lock_guard lock(present_mutex_);
+    present_pending_[job.slot] = true;
+    present_queue_.push_back(job);
+  }
+  present_cv_.notify_one();
+}
+
+void Renderer::WaitPresented(uint32_t slot) {
+  std::unique_lock lock(present_mutex_);
+  presented_cv_.wait(lock, [&] { return !present_pending_[slot]; });
+}
+
+void Renderer::WaitAllPresented() {
+  for (uint32_t i = 0; i < vk::kFramesInFlight; ++i) WaitPresented(i);
+}
+
+void Renderer::PresentThread() {
+  for (;;) {
+    PresentJob job;
+    {
+      std::unique_lock lock(present_mutex_);
+      present_cv_.wait(lock, [&] { return !present_queue_.empty(); });
+      job = present_queue_.front();
+      present_queue_.erase(present_queue_.begin());
+    }
+    Present(job);
+    {
+      std::lock_guard lock(present_mutex_);
+      present_pending_[job.slot] = false;
+    }
+    presented_cv_.notify_all();
+  }
+}
+
 void Renderer::BeginFrame() {
   auto& c = Get();
+  const auto wait_start = std::chrono::steady_clock::now();
+  WaitPresented(c.frame_index);
   c.Begin();
+  wait_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count();
   uint32_t fi = c.frame_index;
   pool_index_[fi] = 0;
   for (VkDescriptorPool p : pools_[fi]) vkResetDescriptorPool(c.device, p, 0);
@@ -888,9 +994,9 @@ bool Renderer::CreateLayouts() {
   return true;
 }
 
-VkDescriptorSet Renderer::AllocSet(VkDescriptorSetLayout layout) {
+VkDescriptorSet Renderer::AllocSet(VkDescriptorSetLayout layout, uint32_t slot) {
   auto& c = Get();
-  uint32_t fi = c.frame_index;
+  const uint32_t fi = slot;
   for (;;) {
     if (pool_index_[fi] == pools_[fi].size()) {
       VkDescriptorPoolSize sizes[4] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 4 * 2048},
@@ -1002,6 +1108,7 @@ VsEntry* Renderer::GetVertexShaderSlow(uint32_t object) {
   auto e = std::make_unique<VsEntry>();
   e->key = key;
   e->hlsl = TranslateXenosShader(ucode.data(), uint32_t(ucode.size()), false, {}, e->info);
+  if (low_quality_) e->hlsl = PlainMultiply(std::move(e->hlsl));
   if (dump_hlsl_) {
     char name[64];
     snprintf(name, sizeof(name), "vs_%016llx.hlsl", static_cast<unsigned long long>(key));
@@ -1012,17 +1119,20 @@ VsEntry* Renderer::GetVertexShaderSlow(uint32_t object) {
   return r;
 }
 
-VkShaderModule Renderer::VsModule(VsEntry* e, VsVariant v) {
-  VkShaderModule& m = e->module[int(v)];
+VkShaderModule Renderer::VsModule(VsEntry* e, VsVariant v, uint32_t varyings) {
+  VkShaderModule& m = e->module[int(v)][varyings];
   if (m) return m;
   std::string hlsl = e->hlsl;
-  if (v != VsVariant::kNormal) {
-    const std::string from = "XVSOut main(uint vid : SV_VertexID) {";
-    size_t at = hlsl.find(from);
-    if (at == std::string::npos) return VK_NULL_HANDLE;
-    hlsl.replace(at, from.size(), "XVSOut xvmain(uint vid) {");
-    hlsl += v == VsVariant::kRect ? kRectEntry : kPointEntry;
-  }
+  const std::string from = "XVSOut main(uint vid : SV_VertexID) {";
+  size_t at = hlsl.find(from);
+  if (at == std::string::npos) return VK_NULL_HANDLE;
+  hlsl.replace(at, from.size(), "XVSOut xvmain(uint vid) {");
+  if (v != VsVariant::kNormal) hlsl += v == VsVariant::kRect ? kRectEntry : kPointEntry;
+  const std::string n = std::to_string(varyings);
+  hlsl += "struct XVSLink {\n  precise float4 pos : SV_Position;\n  float4 o[" + n + "] : TEXCOORD0;\n  float4 pts : TEXCOORD" + n + ";\n};\n";
+  hlsl += "XVSLink main(uint id : SV_VertexID) {\n  XVSOut f = ";
+  hlsl += v == VsVariant::kNormal ? "xvmain" : "xventry";
+  hlsl += "(id);\n  XVSLink l;\n  l.pos = f.pos;\n  for (int i = 0; i < " + n + "; ++i) l.o[i] = f.o[i];\n  l.pts = f.pts;\n  return l;\n}\n";
   m = Module(hlsl, vk::Stage::Vertex, "main", "vertex");
   return m;
 }
@@ -1047,11 +1157,14 @@ PsEntry* Renderer::GetPixelShaderSlow(uint32_t object, uint32_t param_gen_reg) {
   TranslateOptions opt;
   opt.ps_param_gen_reg = param_gen_reg;
   std::string hlsl = TranslateXenosShader(ucode.data(), uint32_t(ucode.size()), true, opt, e->info);
+  if (low_quality_) hlsl = PlainMultiply(std::move(hlsl));
   if (dump_hlsl_) {
     char name[64];
     snprintf(name, sizeof(name), "ps_%016llx.hlsl", static_cast<unsigned long long>(key));
     std::ofstream(cache_dir_ / name, std::ios::binary) << hlsl;
   }
+  e->inputs = PixelInputs(hlsl);
+  hlsl = TrimPixelInputs(std::move(hlsl), e->inputs);
   e->module = Module(hlsl, vk::Stage::Fragment, "main", "pixel");
   PsEntry* r = e->module ? e.get() : nullptr;
   ps_cache_[key] = std::move(e);
@@ -1086,6 +1199,11 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
   // 8_8_8_8 and 8_8_8_8_GAMMA are one target: blends in linear through the sRGB view
   const bool rgba8 = rt.format == VK_FORMAT_R8G8B8A8_UNORM;
   ici.flags = rgba8 ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0;
+  const VkFormat view_formats[2] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB};
+  VkImageFormatListCreateInfo format_list{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+  format_list.viewFormatCount = 2;
+  format_list.pViewFormats = view_formats;
+  if (rgba8) ici.pNext = &format_list;
   ici.imageType = VK_IMAGE_TYPE_2D;
   ici.format = rt.format;
   ici.extent = {rt.host_width, rt.host_height, 1};
@@ -1628,7 +1746,8 @@ VkSampler Renderer::GetSampler(const TexFetch& f, const TextureBinding& b, bool 
   uint32_t mip = b.mip != 0xFF ? b.mip : f.mip_filter();
   uint32_t aniso = b.aniso != 0xFF ? b.aniso : f.aniso_filter();
   VkSamplerCreateInfo d{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-  if (aniso >= 2 && aniso <= 5 && linear && c.features.samplerAnisotropy) {
+  if (low_quality_ && mip == 1) mip = 0;
+  if (aniso >= 2 && aniso <= 5 && linear && c.features.samplerAnisotropy && !low_quality_) {
     d.magFilter = d.minFilter = VK_FILTER_LINEAR;
     d.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     d.anisotropyEnable = VK_TRUE;
@@ -1890,7 +2009,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   PsEntry* ps = ps_object ? GetPixelShader(ps_object, param_gen) : nullptr;
   if (ps_object && !ps) return skip("pixel shader");
   const VsVariant variant = kind == Kind::kRects ? VsVariant::kRect : kind == Kind::kPoints ? VsVariant::kPoint : VsVariant::kNormal;
-  VkShaderModule vs_module = VsModule(vs, variant);
+  VkShaderModule vs_module = VsModule(vs, variant, ps ? ps->inputs : 1);
   if (!vs_module) return skip("vertex shader module");
 
   Targets t;
@@ -2215,7 +2334,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
   VkDescriptorSet set = last_set_;
   if (!set || !(vs_key == last_vs_) || !(ps_key == last_ps_)) {
-    set = AllocSet(set_layout_);
+    set = AllocSet(set_layout_, Get().frame_index);
     last_set_ = set;
     last_vs_ = vs_key;
     last_ps_ = ps_key;
@@ -2412,7 +2531,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
           ri.pColorAttachments = &ca;
           vkCmdBeginRendering(cmd, &ri);
           vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, UtilPipeline(util_copy_, r->format));
-          VkDescriptorSet set = AllocSet(util_set_layout_);
+          VkDescriptorSet set = AllocSet(util_set_layout_, Get().frame_index);
           VkDescriptorImageInfo ii[2] = {{VK_NULL_HANDLE, src->srv, VK_IMAGE_LAYOUT_GENERAL},
                                          {linear_clamp_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED}};
           VkWriteDescriptorSet wr[2];
@@ -2463,12 +2582,12 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
 
 // --- Swap --------------------------------------------------------------------------------------
 
-void Renderer::Present(Resolved* r) {
+void Renderer::Present(const PresentJob& job) {
   auto& c = Get();
-  VkCommandBuffer cmd = Cmd();
+  VkCommandBuffer cmd = c.frames[job.slot].cmd;
   uint32_t image = 0;
-  if (!c.Acquire(image)) {
-    c.Submit(false, 0);
+  if (!c.Acquire(job.slot, image)) {
+    c.Submit(job.slot, false, 0);
     return;
   }
   ImageBarrier(cmd, c.swap_images[image], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -2483,17 +2602,17 @@ void Renderer::Present(Resolved* r) {
   ri.colorAttachmentCount = 1;
   ri.pColorAttachments = &ca;
   vkCmdBeginRendering(cmd, &ri);
-  if (r) {
-    const uint32_t gw = r->used_width ? r->used_width : r->width, gh = r->used_height ? r->used_height : r->height;
+  if (job.view) {
+    const uint32_t gw = job.used_w, gh = job.used_h;
     float sw = float(c.swap_extent.width), sh = float(c.swap_extent.height);
     float aspect = float(gw) / float(gh);
     float dw = sw, dh = sw / aspect;
     if (dh > sh) dh = sh, dw = sh * aspect;
     float x0 = std::floor((sw - dw) / 2), y0 = std::floor((sh - dh) / 2);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, UtilPipeline(util_present_, c.swap_format));
-    VkDescriptorSet set = AllocSet(util_set_layout_);
-    VkDescriptorImageInfo ii[2] = {{VK_NULL_HANDLE, r->srv0, VK_IMAGE_LAYOUT_GENERAL},
-                                   {r->linear ? linear_clamp_ : nearest_clamp_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED}};
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_);
+    VkDescriptorSet set = AllocSet(util_set_layout_, job.slot);
+    VkDescriptorImageInfo ii[2] = {{VK_NULL_HANDLE, job.view, VK_IMAGE_LAYOUT_GENERAL},
+                                   {job.linear ? linear_clamp_ : nearest_clamp_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED}};
     VkWriteDescriptorSet wr[2];
     for (uint32_t i = 0; i < 2; ++i) {
       wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -2505,7 +2624,7 @@ void Renderer::Present(Resolved* r) {
     }
     vkUpdateDescriptorSets(dev(), 2, wr, 0, nullptr);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, util_layout_, 0, 1, &set, 0, nullptr);
-    float push[8] = {0, 0, 0, 0, float(gw) / float(r->width), float(gh) / float(r->height), r->bgra ? 1.0f : 0.0f, 0};
+    float push[8] = {0, 0, 0, 0, float(gw) / float(job.tex_w), float(gh) / float(job.tex_h), job.bgra ? 1.0f : 0.0f, 0};
     vkCmdPushConstants(cmd, util_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
     VkViewport vp{x0, y0 + dh, dw, -dh, 0.0f, 1.0f};
     vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -2515,7 +2634,7 @@ void Renderer::Present(Resolved* r) {
   }
   vkCmdEndRendering(cmd);
   ImageBarrier(cmd, c.swap_images[image], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-  c.Submit(true, image);
+  c.Submit(job.slot, true, image);
 }
 
 void Renderer::CaptureCopies(VkCommandBuffer cmd) {
@@ -2577,8 +2696,24 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
   auto it = resolved_.find(last_front_base_);
   if (it != resolved_.end()) r = &it->second;
   if (Capturing()) CaptureCopies(Cmd());
-  Present(r);
-  if (Capturing()) CaptureWrite();
+  PresentJob job;
+  job.slot = Get().frame_index;
+  if (r) {
+    job.view = r->srv0;
+    job.used_w = r->used_width ? r->used_width : r->width;
+    job.used_h = r->used_height ? r->used_height : r->height;
+    job.tex_w = r->width;
+    job.tex_h = r->height;
+    job.bgra = r->bgra;
+    job.linear = r->linear;
+  }
+  const bool capturing = Capturing();
+  QueuePresent(job);
+  Get().Advance();
+  if (capturing) {
+    WaitAllPresented();
+    CaptureWrite();
+  }
   static auto last_log = std::chrono::steady_clock::now();
   static uint32_t frames_at = 0;
   auto now = std::chrono::steady_clock::now();
@@ -2589,12 +2724,14 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
       long size;
       statm >> size >> rss_pages;
     }
-    REXLOG_INFO("bf2native: frame {}: {:.1f} fps, {} draws ({} skipped), {} passes, {} textures {} MB ({} evicted), {} pipelines, ring {} MB idx {} MB ubo {} MB arena {} MB, rss {} MB",
-                frame_, seconds > 0.01 ? double(frame_ - frames_at) / seconds : 0.0, frame_draws_, frame_skipped_, frame_passes_,
+    const uint32_t frames_done = std::max<uint32_t>(frame_ - frames_at, 1);
+    REXLOG_INFO("bf2native: frame {}: {:.1f} fps, {:.0f} ms/frame of it waiting on the GPU, {} draws ({} skipped), {} passes, {} textures {} MB ({} evicted), {} pipelines, ring {} MB idx {} MB ubo {} MB arena {} MB, rss {} MB",
+                frame_, seconds > 0.01 ? double(frame_ - frames_at) / seconds : 0.0, wait_ms_ / frames_done, frame_draws_, frame_skipped_, frame_passes_,
                 textures_.size(), texture_bytes_ >> 20, evicted_, pipelines_.size(), vertex_used_ >> 20, index_used_ >> 20, uniform_used_ >> 20,
                 arena_used_ >> 20, rss_pages * 4096 >> 20);
     last_log = now;
     frames_at = frame_;
+    wait_ms_ = 0;
   }
   frame_draws_ = frame_skipped_ = frame_passes_ = 0;
   if (frame_ % 600 == 0) SavePipelineCache();

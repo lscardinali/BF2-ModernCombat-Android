@@ -61,10 +61,13 @@ public:
     uint64_t frame_serial = 0;  // frames begun
     Frame& Current() { return frames[frame_index]; }
     VkCommandBuffer Begin();
+    // The presenting thread's side, for a frame the game thread has finished recording:
     // acquires a swapchain image (false and nothing to present when the window is gone or resizing)
-    bool Acquire(uint32_t& image);
-    // submits the current frame; presents image when present is true
-    void Submit(bool present, uint32_t image);
+    bool Acquire(uint32_t slot, uint32_t& image);
+    // submits the frame; presents image when present is true
+    void Submit(uint32_t slot, bool present, uint32_t image);
+    // the game thread moves on to the next frame
+    void Advance() { frame_index = (frame_index + 1) % kFramesInFlight; }
     // destroyed after the GPU is past the current frame
     void Defer(std::function<void()> f) { Current().release.push_back(std::move(f)); }
     // one-off commands, waited for (uploads at init, read-backs)

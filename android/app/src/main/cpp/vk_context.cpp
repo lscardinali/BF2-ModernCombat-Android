@@ -221,12 +221,12 @@ VkCommandBuffer Context::Begin() {
     VK_CHECK(vkBeginCommandBuffer(f.cmd, &bi));
     VK_CHECK(vkBeginCommandBuffer(f.pre, &bi));
     frame_serial++;
-    acquired_ = false;
     return f.cmd;
 }
 
-bool Context::Acquire(uint32_t& image) {
-    Frame& f = Current();
+bool Context::Acquire(uint32_t slot, uint32_t& image) {
+    Frame& f = frames[slot];
+    acquired_ = false;
     VkResult r = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, f.acquired, VK_NULL_HANDLE, &image);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         vkDeviceWaitIdle(device);
@@ -238,8 +238,8 @@ bool Context::Acquire(uint32_t& image) {
     return true;
 }
 
-void Context::Submit(bool present, uint32_t image) {
-    Frame& f = Current();
+void Context::Submit(uint32_t slot, bool present, uint32_t image) {
+    Frame& f = frames[slot];
     VK_CHECK(vkEndCommandBuffer(f.pre));
     VK_CHECK(vkEndCommandBuffer(f.cmd));
     VK_CHECK(vkResetFences(device, 1, &f.done));
@@ -274,7 +274,6 @@ void Context::Submit(bool present, uint32_t image) {
             VK_CHECK(r);
         }
     }
-    frame_index = (frame_index + 1) % kFramesInFlight;
 }
 
 VkCommandBuffer Context::BeginOneTime() {

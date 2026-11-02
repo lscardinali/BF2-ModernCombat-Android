@@ -428,3 +428,17 @@ index f102b56..29a411e 100644
      set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
      set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
      set(SKIP_GLSLANG_INSTALL ON CACHE BOOL "" FORCE)
+diff --git a/thirdparty/disruptorplus/include/disruptorplus/spin_wait.hpp b/thirdparty/disruptorplus/include/disruptorplus/spin_wait.hpp
+index 2d8a95a..4891de3 100644
+--- a/thirdparty/disruptorplus/include/disruptorplus/spin_wait.hpp
++++ b/thirdparty/disruptorplus/include/disruptorplus/spin_wait.hpp
+@@ -54,7 +54,8 @@ namespace disruptorplus
+         /// Reset the spin_wait back to its original state.
+         void reset()
+         {
+-            m_value = std::thread::hardware_concurrency() > 1 ? 0 : 10;
++            static const unsigned cores = std::thread::hardware_concurrency();
++            m_value = cores > 1 ? 0 : 10;
+         }
+         
+         /// \brief

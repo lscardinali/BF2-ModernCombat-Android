@@ -1,4 +1,4 @@
-# scripted pad: <seconds> <BUTTON[+BUTTON...]> [hold_ms] (script_input.h)
+# scripted pad from boot to the first mission: <seconds> <BUTTON[+BUTTON...]> [hold_ms] (script_input.h)
 20 START 200
 23 START 200
 26 START 200

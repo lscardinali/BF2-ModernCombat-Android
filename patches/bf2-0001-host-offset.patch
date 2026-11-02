@@ -20,10 +20,24 @@ index ab799dc..a2b477b 100644
    uint32_t v;
    std::memcpy(&v, Host(base, a), 4);
 diff --git a/project/src/native_audio/audio_system.cpp b/project/src/native_audio/audio_system.cpp
-index b02ef21..9869d27 100644
+index b02ef21..decd1cc 100644
 --- a/project/src/native_audio/audio_system.cpp
 +++ b/project/src/native_audio/audio_system.cpp
-@@ -170,6 +170,13 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
+@@ -75,7 +75,13 @@ bool NativeAudioSystem::OpenDevice() {
+     return false;
+   }
+   sdl_audio_ = true;
++#ifdef __ANDROID__
++  // SDL's default guess is 44.1 kHz on a 48 kHz mixer: resampled there and back.
++  const SDL_AudioSpec device_spec{SDL_AUDIO_F32LE, 2, int(kSampleRate)};
++  device_ = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &device_spec);
++#else
+   device_ = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
++#endif
+   if (!device_) {
+     REXLOG_ERROR("[native-audio] unable to open the playback device: {}", SDL_GetError());
+     return false;
+@@ -170,6 +176,13 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
        out[i * 2 + 1] = std::clamp((ch(1, i) + mid + ch(5, i) * kSide) * kScale, -1.0f, 1.0f);
      }
    }

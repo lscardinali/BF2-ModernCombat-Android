@@ -17,7 +17,7 @@ add_subdirectory(${BF2_ROOT}/third_party/rexglue-sdk ${CMAKE_BINARY_DIR}/rexglue
 # the flags the SDK's own sources build with; the SDK sets them for its directory only
 set(BF2_FLAGS -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
 
-# generated code: -O1, no debug info, warnings off, as Darkwatch builds its own
+# generated code: no debug info, warnings off; ARMv8.2 for LSE atomics instead of the outlined helpers
 set(CMAKE_CURRENT_SOURCE_DIR_SAVED ${CMAKE_CURRENT_SOURCE_DIR})
 set(CMAKE_CURRENT_SOURCE_DIR ${BF2_RECOMP})
 include(${BF2_GEN}/sources.cmake)
@@ -25,7 +25,7 @@ set(CMAKE_CURRENT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR_SAVED})
 add_library(bf2mc_game_code OBJECT ${GENERATED_SOURCES})
 target_include_directories(bf2mc_game_code PRIVATE ${BF2_RECOMP} ${BF2_GEN})
 target_link_libraries(bf2mc_game_code PRIVATE rex::runtime)
-target_compile_options(bf2mc_game_code PRIVATE ${BF2_FLAGS} -O1 -g0 -w)
+target_compile_options(bf2mc_game_code PRIVATE ${BF2_FLAGS} -O2 -march=armv8.2-a -g0 -w)
 target_precompile_headers(bf2mc_game_code PRIVATE ${BF2_GEN}/bf2mc_pch.h)
 
 # a target with the game code, the port's hooks and audio, this project's stand ins for its settings screen and Win32

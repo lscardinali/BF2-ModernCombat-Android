@@ -1,4 +1,6 @@
 // pc_settings.h without its screen: the values the port's hooks read, at their defaults. The Android settings come later.
+#include <unistd.h>
+
 #include <rex/runtime.h>
 
 #include "pc_game_info.h"
@@ -15,7 +17,11 @@ void InstallPadTap(rex::RuntimeConfig&) {}
 const Settings& Get() { return g_settings; }
 float ResolutionScale() { return 1.0f; }
 int MsaaSamples() { return 1; }
-bool EffectEnabled(int) { return true; }
+// Bloom costs a chain of full-screen passes a phone with little memory cannot spare.
+bool EffectEnabled(int) {
+  static const bool on = sysconf(_SC_PHYS_PAGES) / 1024 * sysconf(_SC_PAGESIZE) / 1024 > 4096;
+  return on;
+}
 int Anisotropy() { return 0; }
 float Volume() { return 1.0f; }
 double GuestRefreshHz() { return 60.0; }

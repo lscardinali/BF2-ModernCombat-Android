@@ -22,8 +22,7 @@ using System.Runtime.InteropServices;
 public static class Win {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
-  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref System.Drawing.Point p);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
 }
 '@ -ReferencedAssemblies System.Drawing
 
@@ -31,15 +30,15 @@ function Shot($process, $path) {
     $process.Refresh()
     $h = $process.MainWindowHandle
     if ($h -eq [IntPtr]::Zero) { return }
-    [Win]::SetForegroundWindow($h) | Out-Null
     $r = New-Object Win+RECT
     [Win]::GetClientRect($h, [ref]$r) | Out-Null
-    $p = New-Object System.Drawing.Point 0, 0
-    [Win]::ClientToScreen($h, [ref]$p) | Out-Null
     if ($r.R -le 0) { return }
+    # asks the window itself: never picks up what is on top of it, and takes no focus
     $bmp = New-Object System.Drawing.Bitmap $r.R, $r.B
     $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($p, [System.Drawing.Point]::Empty, $bmp.Size)
+    $dc = $g.GetHdc()
+    [Win]::PrintWindow($h, $dc, 3) | Out-Null  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+    $g.ReleaseHdc($dc)
     $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     $g.Dispose(); $bmp.Dispose()
 }

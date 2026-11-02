@@ -1,0 +1,10 @@
+# the Windows test build from boot to the first mission, and then the pad is yours
+20 START+A 200
+23 START+A 200
+26 START+A 200
+29 START+A 200
+32 START+A 200
+35 START+A 200
+38 START+A 200
+41 START+A 200
+44 START+A 200

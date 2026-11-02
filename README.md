@@ -72,8 +72,11 @@ The game has one human player: one controller object (`0x8284F7EC`) whose `+56` 
 Known problems:
 
 - In the test runs, with nobody playing player 2, a player's soldier was lost within seconds to a few minutes: no longer usable, probably dead, not confirmed. The next teammate takes over when the game offers one; until then the screen shows one player.
-- Frames landing on the wrong side: the side is now read when the frame starts. None showed in a short burst of screenshots, which doesn't rule them out.
-- Not tried: two real pads, whether soldiers move at half speed, what the audio does, the level end.
+- Both halves can show the same soldier for many seconds, after a teammate has been replaced among other times. Reading the side when the frame starts did not cure it, and the cause is unknown.
+- Controls feel half speed, as each player only gets every other update.
+- First-person guns don't draw while the two views differ, and flipping every 30 updates shows them stuck mid-raise. Skipping `sub_821A2418`, `sub_8262F730`, `sub_821A6E20` and `sub_821A62A0` during the hand-over did not bring them back.
+- These all come from handing one player back and forth, so this design is a proof of concept rather than a way to play.
+- Not tried: two real pads, what the audio does, the level end.
 
 ## Windows test build
 

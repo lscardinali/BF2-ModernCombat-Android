@@ -78,6 +78,12 @@ Known problems:
 - These all come from handing one player back and forth, so this design is a proof of concept rather than a way to play.
 - Not tried: two real pads, what the audio does, the level end.
 
+### Spike: a real second player
+
+Setting `BF2_SPLIT2` as well as turning split screen on tries a design without hand-overs, on the Windows build (`split_screen.cpp`). The game thread fills a frame packet (`0x8287A4FC`: +2452 written, +2448 drawn) and hands it to the render thread in `sub_82347190`. Running `sub_82298D20` a second time with no time passing builds a second packet of the same moment for the other half, and game time stays real. The camera object is at `[0x8284F8D8]+48`: +304 projection, +432 view, +624 world. `sub_8219B998` spawns a player, so a second controller from `sub_821C5928` gets a soldier of its own.
+
+What it showed: first-person guns and animations are fine in the first view, the second view draws from its own camera, and both controllers update. It's not playable: no pad reaches the second controller yet, the second view borrows the first camera's rotation and shows no gun, both soldiers spawn in one spot, and the one run with the camera at the second soldier crashed in `sub_821A0208` (a null soldier) soon after the players died.
+
 ## Windows test build
 
 `windows/CMakeLists.txt` builds the Android app's own sources (`android/app/src/main/cpp`) into `out/windows/bf2mc.exe`, so tests on a PC exercise the renderer and split screen the phone runs. It needs Visual Studio's C++ tools, LLVM in `C:\Program Files\LLVM` and the Android SDK's CMake and Ninja. Keep game files, the generated code and the build out of version control, as for Android.

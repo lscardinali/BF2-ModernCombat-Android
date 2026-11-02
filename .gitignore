@@ -1,0 +1,11 @@
+# game data: never committed (your own disc only)
+*.iso
+*.xiso
+*.xex
+/game/
+
+# fetched and generated
+/third_party/
+/out/
+/generated/
+__pycache__/

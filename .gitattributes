@@ -1,0 +1,2 @@
+# git apply needs the patches byte for byte
+*.patch -text

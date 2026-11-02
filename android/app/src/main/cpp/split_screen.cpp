@@ -1,8 +1,12 @@
-// Split-screen research: the game has one human player, the controller object in the global below,
-// and +56 is the soldier it drives. sub_8219D5D8(controller) is its update, sub_8219EBB0(controller,
-// soldier, type) starts a hotswap and sub_8219A4A0(controller, soldier, type) hands it the soldier.
-// user/split_probe logs those; user/split_test also flips between the last two soldiers every 5 s,
-// straight through the hand-over, to see whether the camera and HUD simply follow.
+// Split screen in the campaign. The game has one human player: the controller object in the global
+// below, whose +56 is the soldier it drives. Camera, HUD and input all follow that soldier, so each
+// update hands the controller to the other player's soldier (sub_8219A4A0, the end of the game's own
+// hotswap, type 0 = no transition), and the renderer shows the frames in turn on the two sides.
+//   sub_8219D5D8(controller): the controller's update
+//   sub_8219CA98(controller): the soldier a hotswap would go to now; player 2 starts on that one
+//   +296: target of a hotswap under way. Soldier +905 bit 0x10 (sub_821A0CC0): the game's own hotswap
+//   checks skip soldiers that have it.
+// BF2_SPLIT turns it on (settings.toml, app_main.cpp).
 #include "generated/default/bf2mc_init.h"
 
 #include <rex/hook.h>
@@ -10,103 +14,83 @@
 #include <rex/memory.h>
 #include <rex/ppc/context.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
-#include <cstring>
 
 namespace {
 
 constexpr uint32_t kHumanController = 0x8284F7EC;
+constexpr uint32_t kScreenManager = 0x8285EF78;  // as input_remap.cpp: no screen node in a mission
+constexpr uint32_t kManagerNode = 4216;
+
+using Clock = std::chrono::steady_clock;
 
 uint32_t Load32(uint8_t* base, uint32_t a) {
   return rex::memory::load_and_swap<uint32_t>(rex::memory::GuestPtr(base, a));
 }
-float LoadF(uint8_t* base, uint32_t a) {
-  const uint32_t v = Load32(base, a);
-  float f;
-  std::memcpy(&f, &v, 4);
-  return f;
-}
 
-bool ProbeOn() {
-  static const bool on = std::getenv("BF2_SPLIT_PROBE") != nullptr;
-  return on;
-}
-bool TestOn() {
-  static const bool on = std::getenv("BF2_SPLIT_TEST") != nullptr;
+bool SplitOn() {
+  static const bool on = std::getenv("BF2_SPLIT") != nullptr;
   return on;
 }
 
-uint32_t g_other = 0;       // the soldier the controller left in the last hand-over
-bool g_flipping = false;    // our own hand-over is running
-std::chrono::steady_clock::time_point g_next_flip, g_next_pos;
-
-// sub_821A0CC0: bit 0x10 of +905; the game's own hotswap checks skip soldiers that have it.
 bool Flagged(uint8_t* base, uint32_t soldier) {
   return (rex::memory::GuestPtr(base, soldier + 905)[0] & 0x10) != 0;
 }
 
-// The position of the object the controller is attached to (+76, transform at +12), as sub_8219E9B8 reads it.
-void LogPosition(PPCContext& ctx, uint8_t* base, uint32_t controller, const char* when) {
-  const uint32_t object = Load32(base, controller + 76);
-  if (!object) return;
+bool InMission(uint8_t* base) {
+  const uint32_t manager = Load32(base, kScreenManager);
+  return manager && Load32(base, manager + kManagerNode) == 0;
+}
+
+uint32_t g_soldier[2] = {};  // game thread
+int g_turn = 0;
+std::atomic<int> g_side{0};
+std::atomic<int64_t> g_last_flip{0};  // steady clock ticks
+
+void Update(PPCContext& ctx, uint8_t* base, uint32_t controller) {
+  const uint32_t current = Load32(base, controller + 56);
+  if (!current || !InMission(base) || Load32(base, controller + 296) || Flagged(base, current)) return;
+  g_soldier[g_turn] = current;  // a hotswap the player made stays theirs
+  if (!g_soldier[1] || Flagged(base, g_soldier[1])) {
+    g_soldier[1] = 0;
+    PPCContext saved = ctx;
+    sub_8219CA98(ctx, base);
+    const uint32_t target = ctx.r3.u32;
+    ctx = saved;
+    if (!target || target == g_soldier[0] || Flagged(base, target)) return;
+    g_soldier[1] = target;
+    REXLOG_INFO("split: player 2 is soldier {:08X}, player 1 {:08X}", target, g_soldier[0]);
+  }
+  const int next = !g_turn;
+  if (!g_soldier[next] || Flagged(base, g_soldier[next])) return;
   PPCContext saved = ctx;
-  ctx.r3.u64 = object + 12;
-  sub_8262A2F8(ctx, base);
-  const uint32_t m = ctx.r3.u32;
+  ctx.r4.u64 = g_soldier[next];
+  ctx.r5.u64 = 0;
+  sub_8219A4A0(ctx, base);
   ctx = saved;
-  REXLOG_INFO("split: {} soldier {:08X} object {:08X} at {:.1f} {:.1f} {:.1f}", when, Load32(base, controller + 56),
-              object, LoadF(base, m + 48), LoadF(base, m + 52), LoadF(base, m + 56));
+  g_turn = next;
+  g_side.store(next, std::memory_order_relaxed);
+  g_last_flip.store(Clock::now().time_since_epoch().count(), std::memory_order_relaxed);
 }
 
 }  // namespace
 
-REX_HOOK_RAW(sub_8219EBB0) {
-  if (ProbeOn()) {
-    REXLOG_INFO("split: hotswap start controller {:08X} target {:08X} type {} from {:08X}", ctx.r3.u32, ctx.r4.u32,
-                ctx.r5.u32, uint32_t(ctx.lr));
-  }
-  __imp__sub_8219EBB0(ctx, base);
+namespace bf2n {
+
+// The side the next finished frame belongs to, -1 when the screen isn't split right now.
+int SplitSide() {
+  if (!SplitOn()) return -1;
+  const auto last = Clock::duration(g_last_flip.load(std::memory_order_relaxed));
+  if (Clock::now().time_since_epoch() - last > std::chrono::milliseconds(1000)) return -1;
+  return g_side.load(std::memory_order_relaxed);
 }
 
-REX_HOOK_RAW(sub_8219A4A0) {
-  const uint32_t controller = ctx.r3.u32, target = ctx.r4.u32, type = ctx.r5.u32;
-  const uint32_t before = controller ? Load32(base, controller + 56) : 0;
-  if (ProbeOn()) {
-    REXLOG_INFO("split: hand-over controller {:08X} soldier {:08X} -> {:08X} type {} from {:08X}{}", controller, before,
-                target, type, uint32_t(ctx.lr), g_flipping ? " (ours)" : "");
-  }
-  __imp__sub_8219A4A0(ctx, base);
-  if (!g_flipping && before && before != target) g_other = before;
-}
+}  // namespace bf2n
 
 REX_HOOK_RAW(sub_8219D5D8) {
   const uint32_t controller = ctx.r3.u32;
-  if (TestOn() && controller == Load32(base, kHumanController)) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= g_next_pos) {
-      g_next_pos = now + std::chrono::seconds(1);
-      LogPosition(ctx, base, controller, "pos");
-    }
-    if (g_other && now >= g_next_flip) {
-      g_next_flip = now + std::chrono::seconds(5);
-      const uint32_t current = Load32(base, controller + 56);
-      if (Flagged(base, g_other)) {
-        REXLOG_INFO("split: not flipping to {:08X}: flagged", g_other);
-        g_other = 0;
-      } else {
-        LogPosition(ctx, base, controller, "before");
-        PPCContext saved = ctx;
-        ctx.r4.u64 = g_other;
-        ctx.r5.u64 = 0;
-        g_flipping = true;
-        sub_8219A4A0(ctx, base);
-        g_flipping = false;
-        ctx = saved;
-        g_other = current;
-        LogPosition(ctx, base, controller, "after");
-      }
-    }
-  }
+  if (SplitOn() && controller == Load32(base, kHumanController)) Update(ctx, base, controller);
   __imp__sub_8219D5D8(ctx, base);
 }

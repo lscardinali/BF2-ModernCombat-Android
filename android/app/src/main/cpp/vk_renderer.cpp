@@ -44,6 +44,7 @@
 #include "vk_shaders.h"
 
 namespace bf2n {
+int SplitSide();  // split_screen.cpp
 namespace {
 
 using vk::Get;
@@ -629,7 +630,21 @@ class Renderer {
     VkImageView view = VK_NULL_HANDLE;
     uint32_t used_w = 0, used_h = 0, tex_w = 1, tex_h = 1;
     bool bgra = false, linear = true;
+    VkImage image = VK_NULL_HANDLE;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    uint32_t host_w = 0, host_h = 0;
+    int side = -1;  // split screen: the side this frame belongs to
   };
+  struct SplitSideImage {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    uint32_t w = 0, h = 0;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    bool ready = false;
+  };
+  SplitSideImage split_[2];  // present thread
+  void SplitCopy(VkCommandBuffer cmd, const PresentJob& job);
   void Present(const PresentJob& job);
   void PresentThread();
   void QueuePresent(const PresentJob& job);
@@ -1550,7 +1565,7 @@ Resolved* Renderer::GetResolved(const TexFetch& f, float scale) {
   ici.mipLevels = 1;
   ici.arrayLayers = slices;
   ici.samples = VK_SAMPLE_COUNT_1_BIT;
-  ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   if (vkCreateImage(dev(), &ici, nullptr, &r.image) != VK_SUCCESS) return nullptr;
   r.memory = AllocImage(r.image);
   if (!r.memory) return nullptr;
@@ -2651,6 +2666,44 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
 
 // --- Swap --------------------------------------------------------------------------------------
 
+// Keeps the frame for its side: the other side's picture has to stay on screen until its next frame.
+void Renderer::SplitCopy(VkCommandBuffer cmd, const PresentJob& job) {
+  SplitSideImage& s = split_[job.side];
+  if (s.w != job.host_w || s.h != job.host_h || s.format != job.format) {
+    vkDeviceWaitIdle(dev());
+    if (s.view) vkDestroyImageView(dev(), s.view, nullptr);
+    if (s.image) vkDestroyImage(dev(), s.image, nullptr);
+    if (s.memory) vkFreeMemory(dev(), s.memory, nullptr);
+    s = {};
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = job.format;
+    ici.extent = {job.host_w, job.host_h, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (vkCreateImage(dev(), &ici, nullptr, &s.image) != VK_SUCCESS) return;
+    s.memory = AllocImage(s.image);
+    if (!s.memory) return;
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = s.image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = job.format;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VK_CHECK(vkCreateImageView(dev(), &vi, nullptr, &s.view));
+    s.w = job.host_w, s.h = job.host_h, s.format = job.format;
+    ImageBarrier(cmd, s.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+  }
+  ImageBarrier(cmd, job.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+  VkImageCopy copy{};
+  copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  copy.extent = {job.host_w, job.host_h, 1};
+  vkCmdCopyImage(cmd, job.image, VK_IMAGE_LAYOUT_GENERAL, s.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+  ImageBarrier(cmd, s.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+  s.ready = true;
+}
+
 void Renderer::Present(const PresentJob& job) {
   auto& c = Get();
   VkCommandBuffer cmd = c.frames[job.slot].cmd;
@@ -2659,6 +2712,8 @@ void Renderer::Present(const PresentJob& job) {
     c.Submit(job.slot, false, 0);
     return;
   }
+  const bool split = job.view && job.side >= 0;
+  if (split) SplitCopy(cmd, job);
   ImageBarrier(cmd, c.swap_images[image], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
   VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
   ca.imageView = c.swap_views[image];
@@ -2678,29 +2733,40 @@ void Renderer::Present(const PresentJob& job) {
     float dw = sw, dh = sw / aspect;
     if (dh > sh) dh = sh, dw = sh * aspect;
     if (fill_screen_) dw = sw, dh = sh;
-    float x0 = std::floor((sw - dw) / 2), y0 = std::floor((sh - dh) / 2);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_);
-    VkDescriptorSet set = AllocSet(util_set_layout_, job.slot);
-    VkDescriptorImageInfo ii[2] = {{VK_NULL_HANDLE, job.view, VK_IMAGE_LAYOUT_GENERAL},
-                                   {job.linear ? linear_clamp_ : nearest_clamp_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED}};
-    VkWriteDescriptorSet wr[2];
-    for (uint32_t i = 0; i < 2; ++i) {
-      wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-      wr[i].dstSet = set;
-      wr[i].dstBinding = i ? vk::kBindPsSmp : vk::kBindPsTex;
-      wr[i].descriptorCount = 1;
-      wr[i].descriptorType = i ? VK_DESCRIPTOR_TYPE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-      wr[i].pImageInfo = &ii[i];
+    const VkRect2D scissor{{0, 0}, c.swap_extent};
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    auto draw = [&](VkImageView view, float x0, float y0, float w, float h, float u, float v) {
+      VkDescriptorSet set = AllocSet(util_set_layout_, job.slot);
+      VkDescriptorImageInfo ii[2] = {{VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL},
+                                     {job.linear ? linear_clamp_ : nearest_clamp_, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED}};
+      VkWriteDescriptorSet wr[2];
+      for (uint32_t i = 0; i < 2; ++i) {
+        wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr[i].dstSet = set;
+        wr[i].dstBinding = i ? vk::kBindPsSmp : vk::kBindPsTex;
+        wr[i].descriptorCount = 1;
+        wr[i].descriptorType = i ? VK_DESCRIPTOR_TYPE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        wr[i].pImageInfo = &ii[i];
+      }
+      vkUpdateDescriptorSets(dev(), 2, wr, 0, nullptr);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, util_layout_, 0, 1, &set, 0, nullptr);
+      float push[8] = {0, 0, 0, 0, u, v, job.bgra ? 1.0f : 0.0f, 0};
+      vkCmdPushConstants(cmd, util_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
+      VkViewport vp{x0, y0 + h, w, -h, 0.0f, 1.0f};
+      vkCmdSetViewport(cmd, 0, 1, &vp);
+      vkCmdDraw(cmd, 3, 1, 0, 0);
+    };
+    if (split) {
+      // Two pictures side by side keep their shape: 2 x 16:9 nearly fills a 20:9 phone.
+      float half = std::floor(sw / 2), h = fill_screen_ ? sh : std::min(sh, half / aspect);
+      float y0 = std::floor((sh - h) / 2);
+      for (int i = 0; i < 2; ++i)
+        if (split_[i].ready) draw(split_[i].view, i * half, y0, half, h, 1.0f, 1.0f);
+    } else {
+      draw(job.view, std::floor((sw - dw) / 2), std::floor((sh - dh) / 2), dw, dh, float(gw) / float(job.tex_w),
+           float(gh) / float(job.tex_h));
     }
-    vkUpdateDescriptorSets(dev(), 2, wr, 0, nullptr);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, util_layout_, 0, 1, &set, 0, nullptr);
-    float push[8] = {0, 0, 0, 0, float(gw) / float(job.tex_w), float(gh) / float(job.tex_h), job.bgra ? 1.0f : 0.0f, 0};
-    vkCmdPushConstants(cmd, util_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
-    VkViewport vp{x0, y0 + dh, dw, -dh, 0.0f, 1.0f};
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc{{0, 0}, c.swap_extent};
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdDraw(cmd, 3, 1, 0, 0);
   }
   vkCmdEndRendering(cmd);
   ImageBarrier(cmd, c.swap_images[image], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
@@ -2776,6 +2842,11 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
     job.tex_h = r->height;
     job.bgra = r->bgra;
     job.linear = r->linear;
+    job.image = r->image;
+    job.format = r->format;
+    job.host_w = r->host_width * job.used_w / r->width;
+    job.host_h = r->host_height * job.used_h / r->height;
+    job.side = SplitSide();
   }
   const bool capturing = Capturing();
   QueuePresent(job);

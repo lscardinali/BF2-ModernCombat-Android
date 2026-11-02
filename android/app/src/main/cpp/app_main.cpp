@@ -112,8 +112,10 @@ int main(int argc, char** argv) {
 
   if (fs::exists(user / "audio_log", ec)) setenv("BF2_AUDIO_LOG", "1", 1);
   if (fs::exists(user / "pcm_dump", ec)) setenv("BF2_PCM_DUMP", (user / "mix.pcm").c_str(), 1);
-  if (fs::exists(user / "split_probe", ec)) setenv("BF2_SPLIT_PROBE", "1", 1);
-  if (fs::exists(user / "split_test", ec)) setenv("BF2_SPLIT_TEST", "1", 1);
+  if (std::ifstream f(user / "settings.toml"); f) {  // written by GameSettings.kt
+    for (std::string line; std::getline(f, line);)
+      if (line == "split_screen = true") setenv("BF2_SPLIT", "1", 1);
+  }
   if (std::ifstream f(user / "draw_stacks"); f) {  // a number of seconds: maps two frames after that long
     std::string seconds;
     f >> seconds;

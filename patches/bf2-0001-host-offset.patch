@@ -1,0 +1,49 @@
+diff --git a/project/src/game_natives.cpp b/project/src/game_natives.cpp
+index ab799dc..a2b477b 100644
+--- a/project/src/game_natives.cpp
++++ b/project/src/game_natives.cpp
+@@ -32,6 +32,7 @@
+ #include <rex/logging.h>
+ #include <rex/ppc/context.h>
+ #include <rex/ppc/intrinsics.h>
++#include <rex/system/xmemory.h>
+ 
+ REX_EXTERN(__imp__sub_82349150);
+ REX_EXTERN(__imp__sub_824AD0A8);
+@@ -98,7 +99,7 @@ using namespace bf2_natives;
+ using V = simde__m128i;
+ using F = simde__m128;
+ 
+-uint8_t* Host(uint8_t* base, uint32_t a) { return base + a + (a >= 0xE0000000u ? 0x1000u : 0u); }
++uint8_t* Host(uint8_t* base, uint32_t a) { return base + a + rex::memory::detail::PhysicalHostOffset(a); }
+ uint32_t Load32(uint8_t* base, uint32_t a) {
+   uint32_t v;
+   std::memcpy(&v, Host(base, a), 4);
+diff --git a/project/src/native_gpu/gpu_hooks.cpp b/project/src/native_gpu/gpu_hooks.cpp
+index a245717..5a9ecd6 100644
+--- a/project/src/native_gpu/gpu_hooks.cpp
++++ b/project/src/native_gpu/gpu_hooks.cpp
+@@ -54,12 +54,12 @@ uint8_t* Mem() {
+ }
+ uint32_t Load32(uint32_t a) {
+   uint32_t v;
+-  std::memcpy(&v, Mem() + a + (a >= 0xE0000000u ? 0x1000u : 0u), 4);
++  std::memcpy(&v, Mem() + a + rex::memory::detail::PhysicalHostOffset(a), 4);
+   return native_host::ByteSwap32(v);
+ }
+ void Store32(uint32_t a, uint32_t v) {
+   v = native_host::ByteSwap32(v);
+-  std::memcpy(Mem() + a + (a >= 0xE0000000u ? 0x1000u : 0u), &v, 4);
++  std::memcpy(Mem() + a + rex::memory::detail::PhysicalHostOffset(a), &v, 4);
+ }
+ 
+ void EnsureRenderer() {
+@@ -237,7 +237,7 @@ REX_HOOK_RAW(sub_8248AB00) {
+   imm.shader = shader;
+   imm.declaration = declaration;
+   imm.declaration_id = Load32(declaration + 32);
+-  const uint8_t* src = Mem() + start + (start >= 0xE0000000u ? 0x1000u : 0u);
++  const uint8_t* src = Mem() + start + rex::memory::detail::PhysicalHostOffset(start);
+   imm.code.assign(src, src + size);
+   ++imm.generation;
+   static std::atomic<int> logs{0};

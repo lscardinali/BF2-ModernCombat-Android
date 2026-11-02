@@ -288,6 +288,31 @@ index 9ac8d15..b05edbd 100644
          auto native_mutex = static_cast<pthread_mutex_t*>(handles[i]->mutex_.native_handle());
          int result = pthread_mutex_trylock(native_mutex);
          if (result == 0 || result == EOWNERDEAD) {
+diff --git a/src/system/xthread.cpp b/src/system/xthread.cpp
+index 77bce25..2d16b1e 100644
+--- a/src/system/xthread.cpp
++++ b/src/system/xthread.cpp
+@@ -942,10 +942,9 @@ X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
+   bool should_resume_host = false;
+   {
+     std::lock_guard<std::mutex> lock(suspend_mutex_);
++    // Wraps at 0, as on Windows: a resume that wins the race with the thread's own suspend cancels that suspend.
+     uint8_t previous = guest_thread->suspend_count;
+-    if (previous > 0) {
+-      guest_thread->suspend_count--;
+-    }
++    guest_thread->suspend_count--;
+     if (out_suspend_count) {
+       *out_suspend_count = previous;
+     }
+@@ -992,6 +991,7 @@ uint32_t XThread::SelfSuspend() {
+   std::unique_lock<std::mutex> lock(suspend_mutex_);
+   uint32_t previous = guest_thread->suspend_count;
+   guest_thread->suspend_count++;
++  // Wrapped to 0: a resume came first, see Resume.
+   suspend_cv_.wait(lock, [guest_thread]() { return guest_thread->suspend_count == 0; });
+   return previous;
+ }
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
 index 5bd3dc5..cde3896 100644
 --- a/src/ui/CMakeLists.txt

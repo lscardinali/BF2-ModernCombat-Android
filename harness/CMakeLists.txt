@@ -11,7 +11,7 @@ add_executable(smoke smoke.cpp)
 target_link_libraries(smoke PRIVATE rexruntime)
 set_target_properties(smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_executable(bf2mc main.cpp null_renderer.cpp)
+add_executable(bf2mc main.cpp null_renderer.cpp trace_hooks.cpp)
 bf2mc_add_game(bf2mc)
 set_target_properties(bf2mc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 target_link_options(bf2mc PRIVATE -rdynamic)

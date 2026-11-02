@@ -43,7 +43,8 @@ function(bf2mc_add_game target)
         ${BF2_PORT}/native_audio/command_queue.cpp
         ${BF2_PORT}/native_audio/xma_engine.cpp
         ${BF2_ROOT}/src/android_settings.cpp
-        ${BF2_ROOT}/src/android_win32.cpp)
+        ${BF2_ROOT}/src/android_win32.cpp
+        ${BF2_ROOT}/src/thread_dump.cpp)
     target_include_directories(${target} PRIVATE
         ${BF2_ROOT}/src ${BF2_ROOT}/src/compat ${BF2_PORT} ${BF2_RECOMP} ${BF2_GEN}
         ${BF2_ROOT}/third_party/rexglue-sdk/thirdparty/FFmpeg)

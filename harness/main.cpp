@@ -20,6 +20,7 @@
 #include "native_audio/audio_system.h"
 #include "native_gpu/native_gpu.h"
 #include "script_input.h"
+#include "thread_dump.h"
 
 int main(int argc, char** argv) {
   std::filesystem::path game = "game", user = "user";
@@ -88,6 +89,9 @@ int main(int argc, char** argv) {
   }
   main_thread->Resume();
   REXLOG_INFO("harness: game thread started");
+  if (const char* dump = std::getenv("BF2_DUMP_AFTER"); dump && *dump) {
+    ThreadDumpAfter((user / "stacks.txt").c_str(), std::atoi(dump), 3);
+  }
   if (seconds > 0) {
     for (int i = 0; i < seconds; ++i) {
       std::this_thread::sleep_for(std::chrono::seconds(1));

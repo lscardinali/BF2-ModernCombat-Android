@@ -1,9 +1,11 @@
 # Runs out/windows/bf2mc.exe, takes screenshots of its window and, with -Stacks, has the debugger write every thread's
 # stack at the end (cdb, non-invasive: the game keeps its state). Everything lands in out/runs/<Name>.
-#   tools/run_windows.ps1 [-Name run] [-Seconds 60] [-Script pads/menus.txt] [-Split] [-ScriptPlayer 1] [-Shots 10,30,60] [-Stacks]
+#   tools/run_windows.ps1 [-Name run] [-Seconds 60] [-Script pads/menus.txt] [-Split] [-ScriptPlayer 1] [-Shots 10,30,60] [-Stacks] [-Validate]
 param([string]$Name = 'win', [int]$Seconds = 60, [string]$Script = '', [switch]$Split, [int]$ScriptPlayer = -1,
-      [int[]]$Shots = @(), [switch]$Stacks)
+      [int[]]$Shots = @(), [switch]$Stacks, [switch]$Validate, [switch]$Debugger, [string]$CdbExtra = '')
 $Root = Split-Path -Parent $PSScriptRoot
+Get-Process bf2mc, cdb -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process bf2mc -ErrorAction SilentlyContinue | Wait-Process -Timeout 20 -ErrorAction SilentlyContinue
 $Exe = "$Root\out\windows\bf2mc.exe"
 $User = "$Root\out\windows\user"
 $Out = "$Root\out\runs\$Name"
@@ -42,8 +44,28 @@ function Shot($process, $path) {
     $g.Dispose(); $bmp.Dispose()
 }
 
+if ($Validate) {  # needs the Vulkan SDK
+    $env:VK_INSTANCE_LAYERS = 'VK_LAYER_KHRONOS_validation'
+    $env:VK_LAYER_DEBUG_ACTION = 'VK_DBG_LAYER_ACTION_LOG_MSG'
+    $env:VK_LAYER_REPORT_FLAGS = 'error'
+    $env:VK_LAYER_LOG_FILENAME = "$Out\validation.txt"
+    Remove-Item "$Out\validation.txt" -ErrorAction SilentlyContinue
+}
 $env:BF2_NO_DIALOG = '1'
-$process = Start-Process $Exe -WorkingDirectory "$Root\out\windows" -PassThru -RedirectStandardError "$Out\stderr.txt"
+if ($Debugger) {
+    # under cdb from the start: what ended the process lands in cdb.txt. First-chance access violations stay quiet, the
+    # runtime handles those itself.
+    # rdi is the guest's PPCContext in the recompiled functions; guest memory starts at 0x100000000
+    $commands = 'sxd -c2 ".lastevent; r; dq @rdi L28; db 0x18284F9B8+0n320 L10; db 0x18284F7EC L4; kn 60; ~* kn 16; qd" av; ' +
+        'sxd -c2 ".lastevent; r; kn 60; qd" c0000409; bp ntdll!NtTerminateProcess "kn 40; g"; ' + $CdbExtra + ' g'
+    $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+    Start-Process $cdb -WorkingDirectory "$Root\out\windows" -WindowStyle Hidden -ArgumentList @(
+        '-G', '-y', "`"$Root\out\windows`"", '-logo', "`"$Out\cdb.txt`"", '-c', "`"$($commands -replace '"', '\"')`"", "`"$Exe`"")
+    while (-not ($process = Get-Process bf2mc -ErrorAction SilentlyContinue | Select-Object -First 1)) { Start-Sleep -Milliseconds 100 }
+} else {
+    $process = Start-Process $Exe -WorkingDirectory "$Root\out\windows" -PassThru -RedirectStandardError "$Out\stderr.txt"
+}
+$null = $process.Handle  # or ExitCode is lost when it ends
 $start = Get-Date
 $pending = [System.Collections.Generic.List[int]]::new()
 $Shots | Sort-Object | ForEach-Object { $pending.Add($_) }

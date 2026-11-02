@@ -22,6 +22,7 @@ namespace vk {
 constexpr uint32_t kFramesInFlight = 2;
 
 struct Frame {
+    VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkCommandBuffer pre = VK_NULL_HANDLE;    // runs before cmd: uploads and first layouts, so they need no pass to end
     VkFence done = VK_NULL_HANDLE;           // signalled when this frame's commands finished

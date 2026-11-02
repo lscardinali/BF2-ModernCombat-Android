@@ -44,7 +44,7 @@
 #include "vk_shaders.h"
 
 namespace bf2n {
-int SplitSide();  // split_screen.cpp
+int SplitFrameSide();  // split_screen.cpp
 namespace {
 
 using vk::Get;
@@ -2846,7 +2846,7 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
     job.format = r->format;
     job.host_w = r->host_width * job.used_w / r->width;
     job.host_h = r->host_height * job.used_h / r->height;
-    job.side = SplitSide();
+    job.side = SplitFrameSide();
   }
   const bool capturing = Capturing();
   QueuePresent(job);

@@ -179,8 +179,11 @@ bool Context::Init(SDL_Window* window) {
     pci.queueFamilyIndex = queue_family;
     VK_CHECK(vkCreateCommandPool(device, &pci, nullptr, &pool));
     for (Frame& f : frames) {
+        // a pool per frame: the present thread finishes one frame's commands while the render thread records the next,
+        // and a command pool may only be used by one thread at a time
+        VK_CHECK(vkCreateCommandPool(device, &pci, nullptr, &f.pool));
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        ai.commandPool = pool;
+        ai.commandPool = f.pool;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         ai.commandBufferCount = 1;
         VK_CHECK(vkAllocateCommandBuffers(device, &ai, &f.cmd));
@@ -377,6 +380,7 @@ void Context::Shutdown() {
     for (Frame& f : frames) {
         for (auto& r : f.release) r();
         f.release.clear();
+        vkDestroyCommandPool(device, f.pool, nullptr);
         vkDestroyFence(device, f.done, nullptr);
         vkDestroySemaphore(device, f.acquired, nullptr);
         vkDestroySemaphore(device, f.rendered, nullptr);

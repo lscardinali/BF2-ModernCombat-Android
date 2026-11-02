@@ -25,7 +25,8 @@ No game code or data is in this repository. You need your own Xbox 360 USA disc 
 | Vulkan 1.1 and 1.2 drivers, through VK_KHR_dynamic_rendering | path forced and run on the Mali-G57; no Adreno device tried yet |
 | Home screen, in-app game import from the disc image, settings with a fill-the-screen switch | done |
 | Touch controls for play | todo |
-| Split screen in the campaign | experimental, off by default: works on the Mali-G57 until the game freezes, see below |
+| Split screen in the campaign | experimental, off by default, see below |
+| Windows test build | runs the same sources on a PC's Vulkan driver, see below |
 
 ## Layout
 
@@ -70,9 +71,20 @@ The game has one human player: one controller object (`0x8284F7EC`) whose `+56` 
 
 Known problems:
 
-- The game freezes in the mission, about 170 s after launch in the run that was timed, on a read of guest `0x64` in `sub_821FACD0`: an object there has a zero vtable. A dead soldier left behind is the suspect, not confirmed.
-- A frame sometimes lands on the wrong side, so both halves show the same player for a moment. Timing between the game and render threads is the suspect.
-- Not tried: two real pads, whether soldiers move at half speed, what the audio does, the level end, player 1 dying.
+- In the test runs, with nobody playing player 2, a player's soldier was lost within seconds to a few minutes: no longer usable, probably dead, not confirmed. The next teammate takes over when the game offers one; until then the screen shows one player.
+- Frames landing on the wrong side: the side is now read when the frame starts. None showed in a short burst of screenshots, which doesn't rule them out.
+- Not tried: two real pads, whether soldiers move at half speed, what the audio does, the level end.
+
+## Windows test build
+
+`windows/CMakeLists.txt` builds the Android app's own sources (`android/app/src/main/cpp`) into `out/windows/bf2mc.exe`, so tests on a PC exercise the renderer and split screen the phone runs. It needs Visual Studio's C++ tools, LLVM in `C:\Program Files\LLVM` and the Android SDK's CMake and Ninja. Keep game files, the generated code and the build out of version control, as for Android.
+
+```powershell
+tools/build_windows.ps1
+tools/run_windows.ps1 -Name split -Seconds 120 -Script pads/win_split.txt -Split -ScriptPlayer 1 -Shots 70,90 -Debugger
+```
+
+Results land in `out/runs/<Name>`. `-Debugger` runs it under cdb from the Windows SDK: `cdb.txt` has the stacks, named `sub_<guest address>`, and the guest registers of a crash. `-CdbExtra 'ba w4 0x18284FB00 "kn 14; g";'` logs every write to a guest address (guest memory starts at host `0x100000000`). `-Validate` asks for the Vulkan validation layer, which needs the Vulkan SDK installed.
 
 ## Device tiers
 

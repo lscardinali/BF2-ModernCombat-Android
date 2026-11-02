@@ -19,6 +19,24 @@ index ab799dc..a2b477b 100644
  uint32_t Load32(uint8_t* base, uint32_t a) {
    uint32_t v;
    std::memcpy(&v, Host(base, a), 4);
+diff --git a/project/src/native_audio/audio_system.cpp b/project/src/native_audio/audio_system.cpp
+index b02ef21..9869d27 100644
+--- a/project/src/native_audio/audio_system.cpp
++++ b/project/src/native_audio/audio_system.cpp
+@@ -170,6 +170,13 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
+       out[i * 2 + 1] = std::clamp((ch(1, i) + mid + ch(5, i) * kSide) * kScale, -1.0f, 1.0f);
+     }
+   }
++  // BF2_PCM_DUMP=<file>: what is sent to the device, 16-bit stereo at 48 kHz.
++  static FILE* const pcm = std::getenv("BF2_PCM_DUMP") ? std::fopen(std::getenv("BF2_PCM_DUMP"), "wb") : nullptr;
++  if (pcm && device_channels_ == 2) {
++    int16_t s[kFrameSamples * 2];
++    for (uint32_t i = 0; i < kFrameSamples * 2; i++) s[i] = int16_t(out[i] * 32767.0f);
++    std::fwrite(s, sizeof(s), 1, pcm);
++  }
+   // PC settings volume (0 while the settings menu holds the game).
+   SDL_SetAudioStreamGain(stream, pcs::Volume());
+   if (!g_output_stalled.load(std::memory_order_relaxed))
 diff --git a/project/src/native_gpu/gpu_hooks.cpp b/project/src/native_gpu/gpu_hooks.cpp
 index a245717..5a9ecd6 100644
 --- a/project/src/native_gpu/gpu_hooks.cpp

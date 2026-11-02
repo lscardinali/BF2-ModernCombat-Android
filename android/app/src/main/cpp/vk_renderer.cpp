@@ -8,6 +8,7 @@
 // - Uploads go in a command buffer that runs before the frame's, so they split no render pass.
 // - BC textures become RGBA8 on the CPU where the GPU lacks BC.
 #include <SDL3/SDL.h>
+#include <unistd.h>
 #include <xxhash.h>
 
 #include <algorithm>
@@ -48,8 +49,8 @@ using vk::Get;
 constexpr uint32_t kPhysicalSize = 0x20000000u;
 constexpr VkDeviceSize kVertexRing = 32u << 20;   // per frame in flight
 constexpr VkDeviceSize kVertexArena = 96u << 20;  // ranges that stopped changing
-constexpr VkDeviceSize kUniformRing = 12u << 20;  // per frame in flight
-constexpr VkDeviceSize kIndexRing = 8u << 20;     // per frame in flight
+constexpr VkDeviceSize kUniformRing = 16u << 20;  // per frame in flight
+constexpr VkDeviceSize kIndexRing = 16u << 20;    // per frame in flight
 constexpr uint32_t kStableFrames = 30;             // unchanged this long: moved to the arena
 constexpr uint32_t kWatchAfterFrames = 30;
 
@@ -186,6 +187,7 @@ struct View {
   VkImageView view = VK_NULL_HANDLE;
   VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   bool linear = true;  // the format can be filtered
+  uint32_t skip = 0;   // guest mip levels left out of the image
 };
 
 struct HostRT {
@@ -231,6 +233,8 @@ struct HostTex {
   uint32_t levels = 1;
   VkFormat format = VK_FORMAT_UNDEFINED;
   bool decoded_bc = false;
+  uint32_t skip = 0;  // top guest levels left out (size cap)
+  VkDeviceSize bytes = 0;
   TexFetch fetch;
   uint32_t changed_frame = 0;
   bool watched = false;
@@ -520,7 +524,26 @@ class Renderer {
   VkShaderModule Module(const std::string& hlsl, vk::Stage stage, const char* entry, const char* name);
 
   VsEntry* GetVertexShader(uint32_t object);
+  VsEntry* GetVertexShaderSlow(uint32_t object);
   PsEntry* GetPixelShader(uint32_t object, uint32_t param_gen_reg);
+  PsEntry* GetPixelShaderSlow(uint32_t object, uint32_t param_gen_reg);
+  // shader object -> entry, for this frame: spares hashing the microcode on every draw
+  std::unordered_map<uint32_t, VsEntry*> vs_memo_;
+  std::unordered_map<uint64_t, PsEntry*> ps_memo_;
+  // fetch constant + binding -> views and sampler, until the next resolve or frame
+  struct BindingKey {
+    uint32_t d[6];
+    uint32_t binding, aniso;
+    bool operator==(const BindingKey& o) const { return std::memcmp(this, &o, sizeof(*this)) == 0; }
+  };
+  struct BindingKeyHash {
+    size_t operator()(const BindingKey& k) const { return size_t(XXH3_64bits(&k, sizeof(k))); }
+  };
+  struct BindingMemo {
+    View srv, stacked;
+    VkSampler sampler;
+  };
+  std::unordered_map<BindingKey, BindingMemo, BindingKeyHash> binding_memo_;
   bool ReadUcode(uint32_t object, bool pixel, std::vector<uint32_t>& out);
   VkShaderModule VsModule(VsEntry* e, VsVariant v);
 
@@ -536,7 +559,12 @@ class Renderer {
 
   View GetTexture(const TexFetch& f, TexDim want);
   bool GetResolvedView(const TexFetch& f, TexDim want, View& out);
-  VkSampler GetSampler(const TexFetch& f, const TextureBinding& b, bool linear);
+  VkSampler GetSampler(const TexFetch& f, const TextureBinding& b, bool linear, uint32_t skip);
+  void EvictTextures();
+  uint32_t max_texture_ = 0;           // largest side of a mipmapped texture; 0: no cap
+  VkDeviceSize texture_budget_ = 0;    // above this, textures unused for a while go
+  VkDeviceSize texture_bytes_ = 0;
+  uint32_t evicted_ = 0;
   Resolved* GetResolved(const TexFetch& f, float scale);
   uint64_t GuestSignature(const TexFetch& f);
   void Upload(HostTex& t, const HostTexture& ht, uint32_t levels, bool first);
@@ -665,7 +693,15 @@ bool Renderer::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffe
 
 bool Renderer::Init() {
   auto& c = Get();
-  scale_ = pcs::ResolutionScale();
+  const long ram_mb = sysconf(_SC_PHYS_PAGES) / 1024 * sysconf(_SC_PAGESIZE) / 1024;
+  const bool low_memory = ram_mb <= 4096;
+  scale_ = low_memory ? 0.5f : 1.0f;
+  max_texture_ = low_memory ? 256 : 1024;
+  texture_budget_ = VkDeviceSize(low_memory ? 192 : 768) << 20;
+  if (std::ifstream f(g_user_dir / "scale"); f) f >> scale_;
+  if (std::ifstream f(g_user_dir / "max_texture"); f) f >> max_texture_;
+  REXLOG_INFO("bf2native: {} MB of memory: render scale {}, textures up to {} (over {} MB unused ones go)", ram_mb, scale_, max_texture_,
+              texture_budget_ >> 20);
   bc_supported_ = c.features.textureCompressionBC;
   const auto ds = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
   depth_format_ = (FormatFeatures(VK_FORMAT_D32_SFLOAT_S8_UINT) & ds) == ds ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D24_UNORM_S8_UINT;
@@ -714,6 +750,9 @@ void Renderer::BeginFrame() {
   pool_index_[fi] = 0;
   for (VkDescriptorPool p : pools_[fi]) vkResetDescriptorPool(c.device, p, 0);
   vertex_used_ = uniform_used_ = index_used_ = 0;
+  vs_memo_.clear();
+  ps_memo_.clear();
+  binding_memo_.clear();
   vs_raw_count_ = ps_raw_count_ = 0;
   state_valid_ = false;
   bound_pipeline_ = VK_NULL_HANDLE;
@@ -878,7 +917,8 @@ VkDescriptorSet Renderer::AllocSet(VkDescriptorSetLayout layout) {
 
 // SPIR-V kept on disk by the hash of its HLSL: compiling it takes the phone longer than loading a level.
 VkShaderModule Renderer::Module(const std::string& hlsl, vk::Stage stage, const char* entry, const char* name) {
-  uint64_t key = XXH3_64bits(hlsl.data(), hlsl.size()) ^ (uint64_t(stage) << 63);
+  // the entry point counts: the utility shaders share one source
+  uint64_t key = XXH3_64bits(hlsl.data(), hlsl.size()) ^ (uint64_t(stage) << 63) ^ XXH3_64bits(entry, std::strlen(entry));
   char file[32];
   snprintf(file, sizeof(file), "%016llx.spv", static_cast<unsigned long long>(key));
   std::filesystem::path path = cache_dir_ / file;
@@ -942,6 +982,18 @@ bool Renderer::ReadUcode(uint32_t object, bool pixel, std::vector<uint32_t>& out
 }
 
 VsEntry* Renderer::GetVertexShader(uint32_t object) {
+  // The flush may substitute a patched copy per declaration: that one is looked up every time.
+  const bool immediate = LoadedImmediateVertexShader().shader == object;
+  if (!immediate) {
+    auto memo = vs_memo_.find(object);
+    if (memo != vs_memo_.end()) return memo->second;
+  }
+  VsEntry* r = GetVertexShaderSlow(object);
+  if (!immediate && r) vs_memo_[object] = r;
+  return r;
+}
+
+VsEntry* Renderer::GetVertexShaderSlow(uint32_t object) {
   static std::vector<uint32_t> ucode;
   if (!ReadUcode(object, false, ucode)) return nullptr;
   uint64_t key = XXH3_64bits(ucode.data(), ucode.size() * 4);
@@ -976,6 +1028,15 @@ VkShaderModule Renderer::VsModule(VsEntry* e, VsVariant v) {
 }
 
 PsEntry* Renderer::GetPixelShader(uint32_t object, uint32_t param_gen_reg) {
+  const uint64_t memo_key = uint64_t(object) | (uint64_t(param_gen_reg) << 32);
+  auto memo = ps_memo_.find(memo_key);
+  if (memo != ps_memo_.end()) return memo->second;
+  PsEntry* r = GetPixelShaderSlow(object, param_gen_reg);
+  if (r) ps_memo_[memo_key] = r;
+  return r;
+}
+
+PsEntry* Renderer::GetPixelShaderSlow(uint32_t object, uint32_t param_gen_reg) {
   static std::vector<uint32_t> ucode;
   if (!ReadUcode(object, true, ucode)) return nullptr;
   uint64_t key = XXH3_64bits(ucode.data(), ucode.size() * 4) ^ (uint64_t(param_gen_reg) << 56);
@@ -1240,7 +1301,8 @@ void Renderer::LateSyncVertices() {
 
 uint32_t Renderer::UniformAlloc(const void* data, uint32_t size, uint32_t reserve) {
   uint32_t aligned = (reserve + ubo_align_ - 1) & ~(ubo_align_ - 1);
-  if (uniform_used_ + aligned > kUniformRing) {
+  // the binding's range is always 4096 bytes, however few the shader reads
+  if (uniform_used_ + 4096 > kUniformRing) {
     static int logged = 0;
     if (logged++ < 10) REXLOG_WARN("bf2native: uniform ring full");
     uniform_used_ = 0;  // a wrong picture beats no picture
@@ -1368,12 +1430,12 @@ void Renderer::Upload(HostTex& t, const HostTexture& ht, uint32_t levels, bool f
   VkDeviceSize total = 0;
   const uint32_t top_w = bc ? (ht.width + 3) & ~3u : ht.width, top_h = bc ? (ht.height + 3) & ~3u : ht.height;
   for (uint32_t s = 0; s < array; ++s) {
-    for (uint32_t l = 0; l < levels && l < ht.levels; ++l) {
+    for (uint32_t l = t.skip; l < levels + t.skip && l < ht.levels; ++l) {
       const auto& sub = ht.subs[size_t(s) * ht.levels + l];
       if (sub.data.empty()) continue;
       uint32_t w = std::max(top_w >> l, 1u), h = std::max(top_h >> l, 1u), d = ht.is_3d ? std::max(ht.depth >> l, 1u) : 1;
       VkBufferImageCopy region{};
-      region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, ht.is_3d ? 0 : s, 1};
+      region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l - t.skip, ht.is_3d ? 0 : s, 1};
       const uint8_t* data = sub.data.data();
       size_t size = sub.data.size();
       if (bc) {
@@ -1382,12 +1444,12 @@ void Renderer::Upload(HostTex& t, const HostTexture& ht, uint32_t levels, bool f
         const uint32_t rows = sub.slice_pitch / std::max(sub.row_pitch, 1u);
         if (expand) {
           converted.emplace_back();
-          uint32_t bytes = DecodeBc(ht.format, data, row_blocks, rows, converted.back());
+          DecodeBc(ht.format, data, row_blocks, rows, converted.back());
+          if (t.format == VK_FORMAT_A1R5G5B5_UNORM_PACK16) PackTo1555(converted.back());
           data = converted.back().data();
           size = converted.back().size();
           region.bufferRowLength = row_blocks * 4;
           region.bufferImageHeight = rows * 4;
-          (void)bytes;
         } else {
           region.bufferRowLength = row_blocks * 4;
           region.bufferImageHeight = rows * 4;
@@ -1454,7 +1516,7 @@ View Renderer::GetTexture(const TexFetch& f, TexDim want) {
       t.fetch = f;
       frame_textures_.push_back(k);
     }
-    return {t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, t.linear};
+    return {t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, t.linear, t.skip};
   }
   if (t.checked_frame == frame_) return {};
   t.checked_frame = frame_;
@@ -1489,6 +1551,13 @@ View Renderer::GetTexture(const TexFetch& f, TexDim want) {
     w = (w + 3) & ~3u;
     hh = (hh + 3) & ~3u;
   }
+  // Size cap: the top levels of a mipmapped 2D texture stay out of the image. Movie frames and menus have no mips.
+  t.skip = 0;
+  if (max_texture_ && !ht.is_3d) {
+    while (t.skip + 1 < levels && std::max(w >> t.skip, hh >> t.skip) > max_texture_) ++t.skip;
+  }
+  const uint32_t top_w = std::max(w >> t.skip, 1u), top_h = std::max(hh >> t.skip, 1u);
+  const uint32_t host_levels = levels - t.skip;
   t.decoded_bc = bc && !bc_supported_;
   t.format = t.decoded_bc ? BcDecodedFormat(ht.format) : VkFormatOf(ht.format);
   if (t.format == VK_FORMAT_UNDEFINED) return fail("format");
@@ -1499,8 +1568,8 @@ View Renderer::GetTexture(const TexFetch& f, TexDim want) {
   ici.flags = ht.is_cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
   ici.imageType = ht.is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
   ici.format = t.format;
-  ici.extent = {w, hh, ht.is_3d ? ht.depth : 1};
-  ici.mipLevels = levels;
+  ici.extent = {top_w, top_h, ht.is_3d ? ht.depth : 1};
+  ici.mipLevels = host_levels;
   ici.arrayLayers = array;
   ici.samples = VK_SAMPLE_COUNT_1_BIT;
   ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -1515,19 +1584,44 @@ View Renderer::GetTexture(const TexFetch& f, TexDim want) {
   vi.image = t.image;
   vi.viewType = ht.is_3d ? VK_IMAGE_VIEW_TYPE_3D : ht.is_cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D_ARRAY;
   vi.format = t.format;
-  vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, array};
+  vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, host_levels, 0, array};
   VK_CHECK(vkCreateImageView(dev(), &vi, nullptr, &t.view));
-  Upload(t, ht, levels, true);
+  Upload(t, ht, host_levels, true);
+  {
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(dev(), t.image, &req);
+    t.bytes = req.size;
+    texture_bytes_ += req.size;
+  }
   t.failed = false;
-  t.levels = levels;
+  t.levels = host_levels;
   t.fetch = f;
   t.changed_frame = frame_;
   t.watched = false;
   frame_textures_.push_back(k);
-  return {t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, t.linear};
+  return {t.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, t.linear, t.skip};
 }
 
-VkSampler Renderer::GetSampler(const TexFetch& f, const TextureBinding& b, bool linear) {
+// Over budget: what has not been drawn for a while goes, oldest first. It comes back from guest memory if it is used again.
+void Renderer::EvictTextures() {
+  if (!texture_budget_ || texture_bytes_ <= texture_budget_) return;
+  std::vector<std::pair<uint32_t, uint64_t>> old;
+  for (auto& [k, tex] : textures_) {
+    if (tex.image && frame_ - tex.checked_frame > 90) old.push_back({tex.checked_frame, k});
+  }
+  std::sort(old.begin(), old.end());
+  for (auto& [frame, k] : old) {
+    if (texture_bytes_ <= texture_budget_ * 3 / 4) break;
+    auto it = textures_.find(k);
+    HostTex& tex = it->second;
+    DestroyLater(tex.image, tex.memory, {tex.view});
+    texture_bytes_ -= tex.bytes;
+    textures_.erase(it);
+    ++evicted_;
+  }
+}
+
+VkSampler Renderer::GetSampler(const TexFetch& f, const TextureBinding& b, bool linear, uint32_t skip) {
   auto& c = Get();
   uint32_t mag = b.mag != 0xFF ? b.mag : f.mag_filter();
   uint32_t min = b.min != 0xFF ? b.min : f.min_filter();
@@ -1553,8 +1647,8 @@ VkSampler Renderer::GetSampler(const TexFetch& f, const TextureBinding& b, bool 
   d.addressModeV = addr[f.clamp(1)];
   d.addressModeW = addr[f.clamp(2)];
   d.mipLodBias = std::clamp(f.lod_bias(), -c.props.limits.maxSamplerLodBias, c.props.limits.maxSamplerLodBias);
-  d.minLod = float(f.mip_min_level());
-  d.maxLod = mip == 2 ? d.minLod : std::max(d.minLod, float(f.mip_max_level()));
+  d.minLod = float(f.mip_min_level() > skip ? f.mip_min_level() - skip : 0);
+  d.maxLod = mip == 2 ? d.minLod : std::max(d.minLod, float(f.mip_max_level() > skip ? f.mip_max_level() - skip : 0));
   d.borderColor = f.border_color() == 2 ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
                   : f.border_color() == 0 ? VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK
                                           : VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
@@ -1904,13 +1998,10 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     state_valid_ = true;
   }
   auto upload_consts = [&](std::array<uint8_t, 4096>& raw, uint32_t& raw_count, uint32_t& offset, const uint8_t* src, uint32_t count) {
-    if (!count) {
-      if (!raw_count && offset == 0) offset = UniformAlloc(nullptr, 0, 4096);
-      return;
-    }
+    if (!count) return;
     const uint32_t bytes = count * 16;
     if (raw_count >= count && std::memcmp(raw.data(), src, bytes) == 0) return;
-    offset = UniformAlloc(nullptr, 0, 4096);
+    offset = UniformAlloc(nullptr, 0, bytes);
     std::memcpy(raw.data(), src, bytes);
     SwapCopy32(reinterpret_cast<uint32_t*>(uniform_map_ + offset), src, count * 4);
     raw_count = count;
@@ -1924,6 +2015,21 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
     uint32_t n = std::min<uint32_t>(uint32_t(info.textures.size()), 16);
     for (uint32_t i = 0; i < n; ++i) {
       const TextureBinding& b = info.textures[i];
+      BindingKey memo_key;
+      std::memcpy(memo_key.d, &st.xf[b.slot * 6], 24);
+      memo_key.binding = uint32_t(b.dim) | (uint32_t(b.mag) << 8) | (uint32_t(b.min) << 16) | (uint32_t(b.mip) << 24);
+      memo_key.aniso = b.aniso;
+      if (auto memo = binding_memo_.find(memo_key); memo != binding_memo_.end() && !Capturing()) {
+        const BindingMemo& m = memo->second;
+        key.views[i] = m.srv.view;
+        key.layouts[i] = m.srv.layout;
+        key.samplers[i] = m.sampler;
+        if (b.dim == TexDim::k3D) {
+          key.views[16 + i] = m.stacked.view;
+          key.layouts[16 + i] = m.stacked.layout;
+        }
+        continue;
+      }
       TexFetch f;
       std::memcpy(f.d, &st.xf[b.slot * 6], 24);
       NormalizeFetch(f);
@@ -1941,7 +2047,8 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
       }
       key.views[i] = srv.view;
       key.layouts[i] = srv.layout;
-      key.samplers[i] = f.type() == 2 ? GetSampler(f, b, srv.linear) : srv.linear ? linear_clamp_ : nearest_clamp_;
+      key.samplers[i] = f.type() == 2 ? GetSampler(f, b, srv.linear, srv.skip) : srv.linear ? linear_clamp_ : nearest_clamp_;
+      binding_memo_[memo_key] = {srv, {key.views[16 + i], key.layouts[16 + i], true, 0}, key.samplers[i]};
     }
   };
   gather(vs->info, vs_key);
@@ -2264,6 +2371,7 @@ void Renderer::Resolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint3
   uint32_t source = flags & 7;
   HostRT* src = source == 4 ? t.depth : (source < 4 ? t.color[source] : nullptr);
   EndPass();
+  binding_memo_.clear();  // resolve destinations may now back the fetches
 
   if (dest_texture && level == 0) {
     TexFetch f = ReadFetch(dest_texture + 16);
@@ -2460,6 +2568,7 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
   RefreshTextures();
   LateSyncVertices();
   EndPass();
+  if (frame_ % 30 == 0) EvictTextures();
   Resolved* r = nullptr;
   if (front_texture) {
     TexFetch f = ReadFetch(front_texture + 16);
@@ -2475,9 +2584,15 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
   auto now = std::chrono::steady_clock::now();
   double seconds = std::chrono::duration<double>(now - last_log).count();
   if (frame_ <= 3 || seconds >= 5.0) {
-    REXLOG_INFO("bf2native: frame {}: {:.1f} fps, {} draws ({} skipped), {} passes, front {:08X}{}, {} textures, {} pipelines, ring {} MB arena {} MB",
+    long rss_pages = 0;
+    if (std::ifstream statm("/proc/self/statm"); statm) {
+      long size;
+      statm >> size >> rss_pages;
+    }
+    REXLOG_INFO("bf2native: frame {}: {:.1f} fps, {} draws ({} skipped), {} passes, {} textures {} MB ({} evicted), {} pipelines, ring {} MB idx {} MB ubo {} MB arena {} MB, rss {} MB",
                 frame_, seconds > 0.01 ? double(frame_ - frames_at) / seconds : 0.0, frame_draws_, frame_skipped_, frame_passes_,
-                last_front_base_, r ? "" : " (not resolved)", textures_.size(), pipelines_.size(), vertex_used_ >> 20, arena_used_ >> 20);
+                textures_.size(), texture_bytes_ >> 20, evicted_, pipelines_.size(), vertex_used_ >> 20, index_used_ >> 20, uniform_used_ >> 20,
+                arena_used_ >> 20, rss_pages * 4096 >> 20);
     last_log = now;
     frames_at = frame_;
   }

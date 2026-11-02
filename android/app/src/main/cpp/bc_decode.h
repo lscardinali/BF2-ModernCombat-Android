@@ -17,6 +17,7 @@ inline VkFormat BcDecodedFormat(DXGI_FORMAT f) {
     case DXGI_FORMAT_BC4_SNORM: return VK_FORMAT_R8_SNORM;
     case DXGI_FORMAT_BC5_UNORM: return VK_FORMAT_R8G8_UNORM;
     case DXGI_FORMAT_BC5_SNORM: return VK_FORMAT_R8G8_SNORM;
+    case DXGI_FORMAT_BC1_UNORM: return VK_FORMAT_A1R5G5B5_UNORM_PACK16;  // half the memory, and all DXT1 can hold
     default: return VK_FORMAT_R8G8B8A8_UNORM;
   }
 }
@@ -87,6 +88,18 @@ inline void Color(const uint8_t* b, bool has_alpha_mode, uint8_t* dst, uint32_t 
 }
 
 }  // namespace bc_detail
+
+// RGBA8 texels to A1R5G5B5, in place.
+inline void PackTo1555(std::vector<uint8_t>& texels) {
+  const size_t n = texels.size() / 4;
+  auto* out = reinterpret_cast<uint16_t*>(texels.data());
+  for (size_t i = 0; i < n; ++i) {
+    const uint8_t* p = texels.data() + i * 4;
+    const uint32_t r = p[0], g = p[1], b = p[2], a = p[3];
+    out[i] = uint16_t(((a >> 7) << 15) | ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
+  }
+  texels.resize(n * 2);
+}
 
 // Returns the bytes per row of `out`, which holds row_blocks * 4 by rows * 4 texels.
 inline uint32_t DecodeBc(DXGI_FORMAT f, const uint8_t* src, uint32_t row_blocks, uint32_t rows, std::vector<uint8_t>& out) {

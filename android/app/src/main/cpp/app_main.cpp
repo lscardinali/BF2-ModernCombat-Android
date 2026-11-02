@@ -10,6 +10,7 @@
 #include <string>
 
 #include <rex/cvar.h>
+#include <rex/input/device_assignment.h>
 #include <rex/input/input_system.h>
 #include <rex/kernel/crt/heap.h>
 #include <rex/kernel/init.h>
@@ -108,6 +109,8 @@ int main(int argc, char** argv) {
   fs::path game = base / "game", user = base / "user";
   fs::create_directories(user, ec);
 
+  if (fs::exists(user / "audio_log", ec)) setenv("BF2_AUDIO_LOG", "1", 1);
+  if (fs::exists(user / "pcm_dump", ec)) setenv("BF2_PCM_DUMP", (user / "mix.pcm").c_str(), 1);
   rex::cvar::Init(argc, argv);
   rex::cvar::ApplyEnvironment();
   auto log_config = rex::BuildLogConfig(REXCVAR_GET(log_level), {});
@@ -134,6 +137,7 @@ int main(int argc, char** argv) {
   std::string script = fs::exists(user / "script.txt", ec) ? (user / "script.txt").string() : "";
   config.input_factory = [script](bool) -> std::unique_ptr<rex::system::IInputSystem> {
     auto input = std::make_unique<rex::input::InputSystem>(nullptr);
+    input->SetDeviceAssignment(std::make_unique<rex::input::SlotAssignment>());  // no pads without one
     input->AddDriver(std::make_unique<SdlPadDriver>());
     if (!script.empty()) {
       auto driver = std::make_unique<ScriptInputDriver>(script);

@@ -16,11 +16,13 @@ class GameSettings(context: Context) {
     )
 
     var fillScreen: Boolean = false
+    var splitScreen: Boolean = false
 
     init {
         if (file.isFile) {
             for (line in file.readLines()) {
                 val parts = line.split('=', limit = 2)
+                if (parts.size == 2 && parts[0].trim() == "split_screen") splitScreen = parts[1].trim() == "true"
                 if (parts.size == 2 && parts[0].trim() == "fill_screen") fillScreen = parts[1].trim() == "true"
             }
         }
@@ -29,7 +31,7 @@ class GameSettings(context: Context) {
     fun save() {
         file.parentFile?.mkdirs()
         val temp = File(file.path + ".new")
-        temp.writeText("fill_screen = $fillScreen\n")
+        temp.writeText("fill_screen = $fillScreen\nsplit_screen = $splitScreen\n")
         temp.renameTo(file)
     }
 }

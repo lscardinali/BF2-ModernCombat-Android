@@ -25,6 +25,7 @@ No game code or data is in this repository. You need your own Xbox 360 USA disc 
 | Vulkan 1.1 and 1.2 drivers, through VK_KHR_dynamic_rendering | path forced and run on the Mali-G57; no Adreno device tried yet |
 | Home screen, in-app game import from the disc image, settings with a fill-the-screen switch | done |
 | Touch controls for play | todo |
+| Split screen in the campaign | experimental, off by default: works on the Mali-G57 until the game freezes, see below |
 
 ## Layout
 
@@ -61,13 +62,25 @@ The app opens on a home screen. With no game installed it asks for the disc imag
 
 Settings is on the home screen and is saved in `user/settings.toml`. **Fill the screen** stretches the 16:9 picture to the whole display, which on a 20:9 phone widens it by about 25%. It is off by default, and it takes effect the next time the game starts. It doesn't widen the game's field of view.
 
+**Split screen (experimental)** shows two soldiers side by side in the campaign, and player 2 takes over a teammate.
+
+## Split screen
+
+The game has one human player: one controller object (`0x8284F7EC`) whose `+56` is the soldier it drives, and the camera, HUD and input follow that soldier. `split_screen.cpp` hands the controller to the other player's soldier on every update, through the end of the game's own hotswap, and the renderer keeps each frame for its side. The first pad drives player 1 and the second pad player 2, each with their own copy of the game's pad state. Each player gets half the frame rate. `user/split_script_player` (0 or 1) gives the scripted pad to one player, for tests without a second pad.
+
+Known problems:
+
+- The game freezes in the mission, about 170 s after launch in the run that was timed, on a read of guest `0x64` in `sub_821FACD0`: an object there has a zero vtable. A dead soldier left behind is the suspect, not confirmed.
+- A frame sometimes lands on the wrong side, so both halves show the same player for a moment. Timing between the game and render threads is the suspect.
+- Not tried: two real pads, whether soldiers move at half speed, what the audio does, the level end, player 1 dying.
+
 ## Device tiers
 
 On phones with 4 GB of memory or less the renderer draws at half resolution, caps mipmapped textures at 256, evicts unused textures over 192 MB, uses plain multiplies and cheaper filtering, and bloom is off. Above 4 GB: full resolution, textures up to 1024, a 768 MB budget, everything on. `user/scale` and `user/max_texture` in the app's files override the first two. The target is Snapdragon 865 and newer; only the Mali-G57 phone has been tried.
 
 ## Measuring
 
-Files in the app's `files/user` folder switch these on: `gpu_times` (GPU time of each pass, every 150 frames), `capture` (a frame number: its draws logged, its targets dumped, `tools/capture_app.ps1`), `dump_stacks`, `audio_log`, `pcm_dump`, `force_vulkan_11`.
+Files in the app's `files/user` folder switch these on: `gpu_times` (GPU time of each pass, every 150 frames), `capture` (a frame number: its draws logged, its targets dumped, `tools/capture_app.ps1`), `dump_stacks`, `draw_stacks` (a number of seconds: the guest call stack of every draw of two frames after that long), `audio_log`, `pcm_dump`, `force_vulkan_11`.
 
 ## Notes from bring-up
 

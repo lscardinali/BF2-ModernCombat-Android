@@ -9,6 +9,10 @@
 using rex::X_RESULT;
 using rex::X_STATUS;
 
+namespace bf2n {
+int SplitSide();  // split_screen.cpp
+}
+
 class SdlPadDriver final : public rex::input::InputDriver {
  public:
   struct State {
@@ -19,12 +23,13 @@ class SdlPadDriver final : public rex::input::InputDriver {
   static_assert(sizeof(State) <= 16);
 
   SdlPadDriver() : rex::input::InputDriver(nullptr, 0) {}
-  static void Publish(const State& s) {
+  // which: 0 every pad and the touch screen together, 1 and 2 the split screen's players
+  static void Publish(int which, const State& s) {
     uint64_t a, b = 0;
     std::memcpy(&a, &s, 8);
     std::memcpy(&b, reinterpret_cast<const char*>(&s) + 8, sizeof(State) - 8);
-    Slot(0).store(a, std::memory_order_relaxed);
-    Slot(1).store(b, std::memory_order_relaxed);
+    Slot(which * 2).store(a, std::memory_order_relaxed);
+    Slot(which * 2 + 1).store(b, std::memory_order_relaxed);
   }
 
   X_STATUS Setup() override { return X_STATUS_SUCCESS; }
@@ -40,7 +45,8 @@ class SdlPadDriver final : public rex::input::InputDriver {
 
   X_RESULT GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) override {
     if (id != kId) return X_ERROR_DEVICE_NOT_CONNECTED;
-    State s = Read();
+    const int side = bf2n::SplitSide();
+    State s = Read(side < 0 ? 0 : side + 1);
     std::memset(out, 0, sizeof(*out));
     out->packet_number = ++packet_;
     out->gamepad.buttons = s.buttons;
@@ -76,7 +82,7 @@ class SdlPadDriver final : public rex::input::InputDriver {
   X_RESULT GetDeviceKeystroke(rex::input::DeviceId id, uint32_t, rex::input::X_INPUT_KEYSTROKE* out) override {
     if (id != kId) return X_ERROR_DEVICE_NOT_CONNECTED;
     if (!out) return X_ERROR_BAD_ARGUMENTS;
-    State s = Read();
+    State s = Read(0);
     uint32_t cur = s.buttons;
     if (s.lt) cur |= 1u << 16;
     if (s.rt) cur |= 1u << 17;
@@ -105,11 +111,11 @@ class SdlPadDriver final : public rex::input::InputDriver {
   static constexpr uint16_t kVk[18] = {0x5810, 0x5811, 0x5812, 0x5813, 0x5814, 0x5815, 0x5816, 0x5817, 0x5805,
                                        0x5804, 0,      0,      0x5800, 0x5801, 0x5802, 0x5803, 0x5806, 0x5807};
   static std::atomic<uint64_t>& Slot(int i) {
-    static std::atomic<uint64_t> slots[2];
+    static std::atomic<uint64_t> slots[6];
     return slots[i];
   }
-  static State Read() {
-    uint64_t a = Slot(0).load(std::memory_order_relaxed), b = Slot(1).load(std::memory_order_relaxed);
+  static State Read(int which) {
+    uint64_t a = Slot(which * 2).load(std::memory_order_relaxed), b = Slot(which * 2 + 1).load(std::memory_order_relaxed);
     State s;
     std::memcpy(&s, &a, 8);
     std::memcpy(reinterpret_cast<char*>(&s) + 8, &b, sizeof(State) - 8);

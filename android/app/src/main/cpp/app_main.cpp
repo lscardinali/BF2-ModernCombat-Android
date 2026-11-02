@@ -41,8 +41,36 @@ void Fail(const std::string& msg) {
 
 int16_t Stick(int16_t v) { return v == -32768 ? int16_t(-32767) : v; }
 
+// Test aid: the scripted pad drives only one split screen player (user/split_script_player: 0 or 1).
+class OnePlayerDriver final : public rex::input::InputDriver {
+ public:
+  OnePlayerDriver(std::unique_ptr<rex::input::InputDriver> inner, int player)
+      : rex::input::InputDriver(nullptr, 0), inner_(std::move(inner)), player_(player) {}
+  X_STATUS Setup() override { return inner_->Setup(); }
+  void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override { inner_->EnumerateDevices(out); }
+  X_RESULT GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) override {
+    const X_RESULT r = inner_->GetDeviceState(id, out);
+    const int side = bf2n::SplitSide();
+    if (r == X_ERROR_SUCCESS && side >= 0 && side != player_) std::memset(&out->gamepad, 0, sizeof(out->gamepad));
+    return r;
+  }
+  X_RESULT GetDeviceCapabilities(rex::input::DeviceId id, uint32_t flags, rex::input::X_INPUT_CAPABILITIES* out) override {
+    return inner_->GetDeviceCapabilities(id, flags, out);
+  }
+  X_RESULT SetDeviceVibration(rex::input::DeviceId id, rex::input::X_INPUT_VIBRATION* v) override {
+    return inner_->SetDeviceVibration(id, v);
+  }
+  X_RESULT GetDeviceKeystroke(rex::input::DeviceId id, uint32_t flags, rex::input::X_INPUT_KEYSTROKE* out) override {
+    return inner_->GetDeviceKeystroke(id, flags, out);
+  }
+
+ private:
+  std::unique_ptr<rex::input::InputDriver> inner_;
+  int player_;
+};
+
 void PublishPad() {
-  SdlPadDriver::State s;
+  SdlPadDriver::State s, player[2];
   int count = 0;
   static SDL_Gamepad* open[8] = {};
   if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
@@ -60,8 +88,17 @@ void PublishPad() {
                   {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, 0x0100}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 0x0200},
                   {SDL_GAMEPAD_BUTTON_SOUTH, 0x1000},       {SDL_GAMEPAD_BUTTON_EAST, 0x2000},
                   {SDL_GAMEPAD_BUTTON_WEST, 0x4000},        {SDL_GAMEPAD_BUTTON_NORTH, 0x8000}};
+      SdlPadDriver::State one;
       for (const auto& m : kMap)
-        if (SDL_GetGamepadButton(g, m.b)) s.buttons |= m.bit;
+        if (SDL_GetGamepadButton(g, m.b)) one.buttons |= m.bit;
+      one.lt = uint8_t(std::max(0, int(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))) >> 7);
+      one.rt = uint8_t(std::max(0, int(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) >> 7);
+      one.lx = Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX));
+      one.ly = Stick(int16_t(-int(Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY)))));
+      one.rx = Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX));
+      one.ry = Stick(int16_t(-int(Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY)))));
+      if (i < 2) player[i] = one;
+      s.buttons |= one.buttons;
       s.lt = std::max<uint8_t>(s.lt, uint8_t(std::max(0, int(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))) >> 7));
       s.rt = std::max<uint8_t>(s.rt, uint8_t(std::max(0, int(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) >> 7));
       if (!s.lx) s.lx = Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX));
@@ -82,7 +119,11 @@ void PublishPad() {
   }
   if (fingers == 1) s.buttons |= 0x1000;
   if (fingers >= 2) s.buttons |= 0x0010;
-  SdlPadDriver::Publish(s);
+  if (fingers == 1) player[0].buttons |= 0x1000;
+  if (fingers >= 2) player[0].buttons |= 0x0010;
+  SdlPadDriver::Publish(0, s);
+  SdlPadDriver::Publish(1, player[0]);
+  SdlPadDriver::Publish(2, player[1]);
 }
 
 }  // namespace
@@ -147,14 +188,17 @@ int main(int argc, char** argv) {
   };
   // user/script.txt: a scripted pad next to the real one, for tools/run_app.ps1 (script_input.h)
   std::string script = fs::exists(user / "script.txt", ec) ? (user / "script.txt").string() : "";
-  config.input_factory = [script](bool) -> std::unique_ptr<rex::system::IInputSystem> {
+  int script_player = -1;
+  if (std::ifstream f(user / "split_script_player"); f) f >> script_player;
+  config.input_factory = [script, script_player](bool) -> std::unique_ptr<rex::system::IInputSystem> {
     auto input = std::make_unique<rex::input::InputSystem>(nullptr);
     input->SetDeviceAssignment(std::make_unique<rex::input::SlotAssignment>());  // no pads without one
     input->AddDriver(std::make_unique<SdlPadDriver>());
     if (!script.empty()) {
       auto driver = std::make_unique<ScriptInputDriver>(script);
       driver->Setup();
-      input->AddDriver(std::move(driver));
+      if (script_player >= 0) input->AddDriver(std::make_unique<OnePlayerDriver>(std::move(driver), script_player));
+      else input->AddDriver(std::move(driver));
     }
     return input;
   };

@@ -6,6 +6,9 @@
 //   sub_8219CA98(controller): the soldier a hotswap would go to now; player 2 starts on that one
 //   +296: target of a hotswap under way. Soldier +905 bit 0x10 (sub_821A0CC0): the game's own hotswap
 //   checks skip soldiers that have it.
+//   +84: the pad state the game reads, current and previous (+168/+172 point into it, sub_82638EC8
+//   compares them for "just pressed"). Each player keeps their own copy, or one player's held button
+//   would read as a press by the other.
 // BF2_SPLIT turns it on (settings.toml, app_main.cpp).
 #include "generated/default/bf2mc_init.h"
 
@@ -17,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -46,6 +50,9 @@ bool InMission(uint8_t* base) {
 
 uint32_t g_soldier[2] = {};  // game thread
 int g_turn = 0;
+constexpr uint32_t kPadStateSize = 180;
+uint8_t g_pad_state[2][kPadStateSize];
+bool g_pad_saved[2] = {};
 std::atomic<int> g_side{0};
 std::atomic<int64_t> g_last_flip{0};  // steady clock ticks
 
@@ -70,6 +77,10 @@ void Update(PPCContext& ctx, uint8_t* base, uint32_t controller) {
   ctx.r5.u64 = 0;
   sub_8219A4A0(ctx, base);
   ctx = saved;
+  uint8_t* pad = rex::memory::GuestPtr(base, Load32(base, controller + 84));
+  std::memcpy(g_pad_state[g_turn], pad, kPadStateSize);
+  g_pad_saved[g_turn] = true;
+  if (g_pad_saved[next]) std::memcpy(pad, g_pad_state[next], kPadStateSize);
   g_turn = next;
   g_side.store(next, std::memory_order_relaxed);
   g_last_flip.store(Clock::now().time_since_epoch().count(), std::memory_order_relaxed);

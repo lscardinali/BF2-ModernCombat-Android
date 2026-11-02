@@ -20,10 +20,21 @@ index ab799dc..a2b477b 100644
    uint32_t v;
    std::memcpy(&v, Host(base, a), 4);
 diff --git a/project/src/native_audio/audio_system.cpp b/project/src/native_audio/audio_system.cpp
-index b02ef21..decd1cc 100644
+index b02ef21..0f99b30 100644
 --- a/project/src/native_audio/audio_system.cpp
 +++ b/project/src/native_audio/audio_system.cpp
-@@ -75,7 +75,13 @@ bool NativeAudioSystem::OpenDevice() {
+@@ -29,6 +29,10 @@ std::atomic<bool> g_output_stalled{false};
+ 
+ NativeAudioSystem* g_system = nullptr;
+ 
++// BF2_AUDIO_LOG: bytes the device asked for that the stream did not have, which it plays as silence.
++std::atomic<uint64_t> g_starved_bytes{0};
++std::atomic<uint32_t> g_starved_times{0};
++
+ // Frames kept queued on the host stream before the guest is asked for more (~32 ms).
+ constexpr uint32_t kTargetQueuedFrames = 6;
+ 
+@@ -75,7 +79,13 @@ bool NativeAudioSystem::OpenDevice() {
      return false;
    }
    sdl_audio_ = true;
@@ -37,7 +48,33 @@ index b02ef21..decd1cc 100644
    if (!device_) {
      REXLOG_ERROR("[native-audio] unable to open the playback device: {}", SDL_GetError());
      return false;
-@@ -170,6 +176,13 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
+@@ -84,8 +94,8 @@ bool NativeAudioSystem::OpenDevice() {
+   int frames = 0;
+   if (SDL_GetAudioDeviceFormat(device_, &spec, &frames)) device_channels_ = spec.channels >= 6 ? 6 : 2;
+   const char* name = SDL_GetAudioDeviceName(device_);
+-  REXLOG_INFO("[native-audio] device '{}': {} ch {} Hz; mixing to {} ch", name ? name : "?", spec.channels,
+-              spec.freq, device_channels_);
++  REXLOG_INFO("[native-audio] device '{}': {} ch {} Hz, {} frames a buffer; mixing to {} ch", name ? name : "?", spec.channels,
++              spec.freq, frames, device_channels_);
+   return true;
+ }
+ 
+@@ -123,7 +133,13 @@ X_STATUS NativeAudioSystem::RegisterClient(uint32_t callback, uint32_t callback_
+     if (c.stream) {
+       SDL_SetAudioStreamGetCallback(
+           c.stream,
+-          [](void* self, SDL_AudioStream*, int, int) { static_cast<NativeAudioSystem*>(self)->wake_.notify_one(); },
++          [](void* self, SDL_AudioStream*, int additional, int) {
++            if (additional > 0) {
++              g_starved_bytes += uint64_t(additional);
++              g_starved_times++;
++            }
++            static_cast<NativeAudioSystem*>(self)->wake_.notify_one();
++          },
+           this);
+     }
+   }
+@@ -170,6 +186,13 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
        out[i * 2 + 1] = std::clamp((ch(1, i) + mid + ch(5, i) * kSide) * kScale, -1.0f, 1.0f);
      }
    }
@@ -51,6 +88,62 @@ index b02ef21..decd1cc 100644
    // PC settings volume (0 while the settings menu holds the game).
    SDL_SetAudioStreamGain(stream, pcs::Volume());
    if (!g_output_stalled.load(std::memory_order_relaxed))
+@@ -189,6 +212,7 @@ void NativeAudioSystem::WorkerMain() {
+   bool log = log_env && *log_env && *log_env != '0';
+   auto log_start = std::chrono::steady_clock::now();
+   uint32_t callbacks = 0;
++  double callback_ms = 0, callback_max_ms = 0;
+   // An output device that stops consuming (a TV or receiver switched off) keeps the stream full,
+   // and the guest would wait on its mixer callbacks forever: after 200 ms without progress the
+   // worker paces by the clock, as without a device, and drops the output until it plays again.
+@@ -203,12 +227,14 @@ void NativeAudioSystem::WorkerMain() {
+   while (running_) {
+     if (log && std::chrono::steady_clock::now() - log_start >= std::chrono::seconds(1)) {
+       auto x = XmaEngine::Get().TakeStats();
+-      REXLOG_INFO("[native-audio] callbacks {} submitted {} peak {} queued {} | xma kicks {} frames {} failed {} "
+-                  "blocks {} no-output {} peak {}",
+-                  callbacks, submitted_.exchange(0), peak_.exchange(0),
+-                  clients_[0].stream ? QueuedFrames(clients_[0]) : 0, x.kicks,
++      REXLOG_INFO("[native-audio] callbacks {} ({:.1f} ms, longest {:.1f}) submitted {} peak {} queued {} starved {} ({:.0f} ms) | "
++                  "xma kicks {} frames {} failed {} blocks {} no-output {} peak {}",
++                  callbacks, callback_ms, callback_max_ms, submitted_.exchange(0), peak_.exchange(0),
++                  clients_[0].stream ? QueuedFrames(clients_[0]) : 0, g_starved_times.exchange(0),
++                  double(g_starved_bytes.exchange(0)) / (device_channels_ * sizeof(float) * kSampleRate) * 1000.0, x.kicks,
+                   x.frames, x.failed, x.blocks, x.no_output, x.peak);
+       callbacks = 0;
++      callback_ms = callback_max_ms = 0;
+       log_start = std::chrono::steady_clock::now();
+     }
+     bool stalled = false;
+@@ -250,8 +276,14 @@ void NativeAudioSystem::WorkerMain() {
+     }
+     for (uint32_t i = 0; i < count && running_; i++) {
+       uint64_t args[] = {due[i][1]};
++      const auto callback_start = std::chrono::steady_clock::now();
+       dispatcher_->Execute(thread->thread_state(), due[i][0], args, 1);
+       callbacks++;
++      if (log) {
++        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - callback_start).count();
++        callback_ms += ms;
++        callback_max_ms = std::max(callback_max_ms, ms);
++      }
+     }
+     if (!device_ || stalled) {
+       // One 256-sample frame per 5.333 ms, on a fixed schedule (a plain sleep after the
+@@ -261,6 +293,13 @@ void NativeAudioSystem::WorkerMain() {
+       clock_next += std::chrono::nanoseconds(5333333);
+       std::this_thread::sleep_until(clock_next);
+     }
++#ifdef __ANDROID__
++    else {
++      // The device takes about 4 frames at a time. Asked for them in one burst, the guest answers some with silence:
++      // keep the callbacks apart, a little faster than the clock so the queue can catch up.
++      std::this_thread::sleep_for(std::chrono::microseconds(4500));
++    }
++#endif
+   }
+ }
+ 
 diff --git a/project/src/native_gpu/gpu_hooks.cpp b/project/src/native_gpu/gpu_hooks.cpp
 index a245717..5a9ecd6 100644
 --- a/project/src/native_gpu/gpu_hooks.cpp

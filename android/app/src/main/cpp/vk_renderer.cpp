@@ -606,6 +606,7 @@ class Renderer {
   VkSampler GetSampler(const TexFetch& f, const TextureBinding& b, bool linear, uint32_t skip);
   void EvictTextures();
   uint32_t max_texture_ = 0;           // largest side of a mipmapped texture; 0: no cap
+  bool fill_screen_ = false;           // settings.toml: stretch the picture to the whole screen instead of bars
   VkDeviceSize texture_budget_ = 0;    // above this, textures unused for a while go
   VkDeviceSize texture_bytes_ = 0;
   uint32_t evicted_ = 0;
@@ -780,6 +781,11 @@ bool Renderer::Init() {
   texture_budget_ = VkDeviceSize(low_memory ? 192 : 768) << 20;
   if (std::ifstream f(g_user_dir / "scale"); f) f >> scale_;
   if (std::ifstream f(g_user_dir / "max_texture"); f) f >> max_texture_;
+  if (std::ifstream f(g_user_dir / "settings.toml"); f) {
+    // written by GameSettings.kt
+    for (std::string line; std::getline(f, line);)
+      if (line == "fill_screen = true") fill_screen_ = true;
+  }
   REXLOG_INFO("bf2native: {} MB of memory: render scale {}, textures up to {} (over {} MB unused ones go)", ram_mb, scale_, max_texture_,
               texture_budget_ >> 20);
   bc_supported_ = c.features.textureCompressionBC;
@@ -2671,6 +2677,7 @@ void Renderer::Present(const PresentJob& job) {
     float aspect = float(gw) / float(gh);
     float dw = sw, dh = sw / aspect;
     if (dh > sh) dh = sh, dw = sh * aspect;
+    if (fill_screen_) dw = sw, dh = sh;
     float x0 = std::floor((sw - dw) / 2), y0 = std::floor((sh - dh) / 2);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_);
     VkDescriptorSet set = AllocSet(util_set_layout_, job.slot);

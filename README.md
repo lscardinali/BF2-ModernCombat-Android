@@ -19,11 +19,12 @@ No game code or data is in this repository. You need your own Xbox 360 USA disc 
 | Recompile `default.xex`, compile the generated code for arm64 | done |
 | Headless harness on device: intro movies, main menu, attract movie, at the game's 30 fps | done |
 | Headless harness on device: first mission, CPU-only speed in play | todo |
-| APK: SDL activity, audio, gamepads, touch (1 finger A, 2 fingers START) | done; game files by `adb`, no import screen yet |
+| APK: SDL activity, audio, gamepads, touch (1 finger A, 2 fingers START) | done |
 | Vulkan renderer: the port's HLSL through glslang, intro movies on screen with sound | done |
 | Vulkan renderer: menus and the first mission (In and Out), played with a pad script | done; about 6-11 fps on the Mali-G57 at half resolution, by scene |
 | Vulkan 1.1 and 1.2 drivers, through VK_KHR_dynamic_rendering | path forced and run on the Mali-G57; no Adreno device tried yet |
-| In-app game import, settings screen, touch controls for play | todo |
+| Home screen, in-app game import from the disc image, settings with a fill-the-screen switch | done |
+| Touch controls for play | todo |
 
 ## Layout
 
@@ -52,6 +53,14 @@ tools/build_harness.ps1
 tools/run_smoke.ps1
 ```
 
+## Installing the game on the phone
+
+The app opens on a home screen. With no game installed it asks for the disc image through the system file picker, checks `default.xex` and extracts what the single player uses (about 4 GB) into the app's files. The multiplayer data, `mpdefault.xex` and `$SystemUpdate` stay on the disc. The `.iso` can be deleted afterwards.
+
+## Settings
+
+Settings is on the home screen and is saved in `user/settings.toml`. **Fill the screen** stretches the 16:9 picture to the whole display, which on a 20:9 phone widens it by about 25%. It is off by default, and it takes effect the next time the game starts. It doesn't widen the game's field of view.
+
 ## Device tiers
 
 On phones with 4 GB of memory or less the renderer draws at half resolution, caps mipmapped textures at 256, evicts unused textures over 192 MB, uses plain multiplies and cheaper filtering, and bloom is off. Above 4 GB: full resolution, textures up to 1024, a 768 MB budget, everything on. `user/scale` and `user/max_texture` in the app's files override the first two. The target is Snapdragon 865 and newer; only the Mali-G57 phone has been tried.
@@ -72,4 +81,5 @@ Files in the app's `files/user` folder switch these on: `gpu_times` (GPU time of
 - A guest thread that suspends itself after another thread has already resumed it must not sleep: on Windows the count wraps and cancels out, and the POSIX path now does the same.
 - `harness/trace_hooks.cpp` (`BF2_TRACE=<s>`), `src/thread_dump.cpp` (`BF2_DUMP_AFTER=<s>`) and `tools/gen_calls.py` are how those two were found: debuggerd needs root on a release phone.
 - glslang ignores `[[vk::binding]]` under HLSL register mapping, and shifts a ByteAddressBuffer as a texture, not as a storage buffer. `tools/spv_bindings.py` prints where things landed.
+- The device takes 960 samples (3.75 of the game's frames) at a time. Asked for them in one burst, the game's mixer answers many with a frame of exact silence: about 40% of frames in the menus and the mission, whatever the frame rate. `audio_system.cpp` now keeps its callbacks about 5 ms apart, which leaves about 0.2%. `audio_log` reports how much the output starved.
 - `build_harness.ps1` leaves `$ErrorActionPreference` alone: CMake writes warnings to stderr, and `Stop` turns them into failures.

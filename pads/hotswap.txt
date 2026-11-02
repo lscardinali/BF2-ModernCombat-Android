@@ -1,0 +1,21 @@
+# scripted pad from boot to the first mission: <seconds> <BUTTON[+BUTTON...]> [hold_ms] (script_input.h)
+# both buttons: the title wants START, the autosave notice and the menus want A
+20 START+A 200
+23 START+A 200
+26 START+A 200
+29 START+A 200
+32 START+A 200
+35 START+A 200
+38 START+A 200
+41 START+A 200
+44 START+A 200
+47 START+A 200
+50 START+A 200
+53 START+A 200
+56 START+A 200
+75 LB+X 200
+78 LB+X 200
+81 LB+X 200
+84 LB+X 200
+87 LB+X 200
+90 LB+X 200

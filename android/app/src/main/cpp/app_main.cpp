@@ -6,6 +6,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 
@@ -111,6 +112,14 @@ int main(int argc, char** argv) {
 
   if (fs::exists(user / "audio_log", ec)) setenv("BF2_AUDIO_LOG", "1", 1);
   if (fs::exists(user / "pcm_dump", ec)) setenv("BF2_PCM_DUMP", (user / "mix.pcm").c_str(), 1);
+  if (fs::exists(user / "split_probe", ec)) setenv("BF2_SPLIT_PROBE", "1", 1);
+  if (fs::exists(user / "split_test", ec)) setenv("BF2_SPLIT_TEST", "1", 1);
+  if (std::ifstream f(user / "draw_stacks"); f) {  // a number of seconds: maps two frames after that long
+    std::string seconds;
+    f >> seconds;
+    setenv("BF2_DRAW_STACKS", seconds.c_str(), 1);
+    setenv("BF2_DRAW_STACKS_FILE", (user / "draw_stacks.txt").c_str(), 1);
+  }
   rex::cvar::Init(argc, argv);
   rex::cvar::ApplyEnvironment();
   auto log_config = rex::BuildLogConfig(REXCVAR_GET(log_level), {});

@@ -145,10 +145,18 @@ index b02ef21..0f99b30 100644
  }
  
 diff --git a/project/src/native_gpu/gpu_hooks.cpp b/project/src/native_gpu/gpu_hooks.cpp
-index a245717..5a9ecd6 100644
+index a245717..1a1eb74 100644
 --- a/project/src/native_gpu/gpu_hooks.cpp
 +++ b/project/src/native_gpu/gpu_hooks.cpp
-@@ -54,12 +54,12 @@ uint8_t* Mem() {
+@@ -26,6 +26,7 @@
+ #include <rex/thread.h>
+ 
+ #include <atomic>
++#include <cstdio>
+ #include <cstdlib>
+ #include <chrono>
+ #include <deque>
+@@ -54,12 +55,12 @@ uint8_t* Mem() {
  }
  uint32_t Load32(uint32_t a) {
    uint32_t v;
@@ -163,7 +171,7 @@ index a245717..5a9ecd6 100644
  }
  
  void EnsureRenderer() {
-@@ -237,7 +237,7 @@ REX_HOOK_RAW(sub_8248AB00) {
+@@ -237,7 +238,7 @@ REX_HOOK_RAW(sub_8248AB00) {
    imm.shader = shader;
    imm.declaration = declaration;
    imm.declaration_id = Load32(declaration + 32);
@@ -172,6 +180,81 @@ index a245717..5a9ecd6 100644
    imm.code.assign(src, src + size);
    ++imm.generation;
    static std::atomic<int> logs{0};
+@@ -246,12 +247,42 @@ REX_HOOK_RAW(sub_8248AB00) {
+                 size, start);
+ }
+ 
++// --- Frame map ---------------------------------------------------------------------------------
++
++// BF2_DRAW_STACKS=<seconds>: after that long, writes the guest call stack of every draw, clear,
++// resolve and swap of two frames to BF2_DRAW_STACKS_FILE. Each line: kind, render target, count,
++// return addresses (innermost first), read from the guest's back chain.
++namespace {
++std::atomic<int> g_stack_swaps{0};
++void LogGuestStack(const char* kind, PPCContext& ctx, uint32_t device, uint32_t count) {
++  static const char* const after = std::getenv("BF2_DRAW_STACKS");
++  if (!after) return;
++  static const auto start = std::chrono::steady_clock::now() + std::chrono::seconds(std::atoi(after));
++  if (std::chrono::steady_clock::now() < start || g_stack_swaps.load() >= 2) return;
++  static FILE* const out = std::fopen(std::getenv("BF2_DRAW_STACKS_FILE"), "w");
++  if (!out) return;
++  std::fprintf(out, "%s rt=%08X n=%u lr=%08X", kind, Load32(device + bf2n::dev::kColorSurfaces), count,
++               uint32_t(ctx.lr));
++  const uint32_t top = Load32(ctx.r13.u32 + 0x70);  // PCR: the high end of this thread's stack
++  uint32_t frame = ctx.r1.u32;
++  for (int i = 0; i < 24 && frame < top; i++) {
++    uint32_t next = Load32(frame);
++    if (next <= frame || next > top) break;
++    std::fprintf(out, " %08X", Load32(next - 8));
++    frame = next;
++  }
++  std::fputc('\n', out);
++  if (kind[0] == 'P' && g_stack_swaps.fetch_add(1) == 1) std::fflush(out);
++}
++}  // namespace
++
+ // --- Draws -------------------------------------------------------------------------------------
+ 
+ // sub_8247CBE0(device, prim, base_vertex, start_index, index_count): DrawIndexedVertices.
+ REX_HOOK_RAW(sub_8247CBE0) {
+   uint32_t device = ctx.r3.u32, prim = ctx.r4.u32, start = ctx.r6.u32, count = ctx.r7.u32;
+   int32_t base_vertex = ctx.r5.s32;
++  LogGuestStack("D", ctx, device, count);
+   __imp__sub_8247CBE0(ctx, base);
+   EnsureRenderer();
+   if (g_renderer_ready) bf2n::RendererDraw(device, prim, base_vertex, start, count, true);
+@@ -260,6 +291,7 @@ REX_HOOK_RAW(sub_8247CBE0) {
+ // sub_8247C9A0(device, prim, start_vertex, vertex_count): DrawVertices.
+ REX_HOOK_RAW(sub_8247C9A0) {
+   uint32_t device = ctx.r3.u32, prim = ctx.r4.u32, start = ctx.r5.u32, count = ctx.r6.u32;
++  LogGuestStack("V", ctx, device, count);
+   __imp__sub_8247C9A0(ctx, base);
+   EnsureRenderer();
+   if (g_renderer_ready) bf2n::RendererDraw(device, prim, int32_t(start), 0, count, false);
+@@ -334,6 +366,7 @@ REX_HOOK_RAW(sub_82474310) {
+   uint32_t device = ctx.r3.u32, count = ctx.r4.u32, rects = ctx.r5.u32, flags = ctx.r6.u32;
+   uint32_t color = ctx.r7.u32, stencil = ctx.r9.u32;
+   float z = float(ctx.f1.f64);
++  LogGuestStack("C", ctx, device, flags);
+   EnsureRenderer();
+   if (g_renderer_ready) bf2n::RendererClear(device, count, rects, flags, color, z, stencil);
+   __imp__sub_82474310(ctx, base);
+@@ -349,6 +382,7 @@ REX_HOOK_RAW(sub_82484E48) {
+   // Stack parameter slots are 8 bytes from r1+0x50; clear_z takes the 9th slot (float args also
+   // consume a GPR slot), clear_stencil is the 10th (low word at +0x5C, see the caller 8234AE40).
+   uint32_t stencil = Load32(ctx.r1.u32 + 0x5C);
++  LogGuestStack("R", ctx, device, dest);
+   EnsureRenderer();
+   if (g_renderer_ready) {
+     bf2n::RendererResolve(device, flags, rect, dest, point, level, slice, clear_color, z, stencil);
+@@ -364,6 +398,7 @@ void FrameTick();  // game_natives.cpp (BF2_NATIVE_AB)
+ REX_HOOK_RAW(sub_82472D10) {
+   bf2_natives::FrameTick();
+   uint32_t device = ctx.r3.u32, front = ctx.r4.u32;
++  LogGuestStack("P", ctx, device, front);
+   EnsureRenderer();
+   if (g_renderer_ready) bf2n::RendererSwap(device, front);
+   __imp__sub_82472D10(ctx, base);
 diff --git a/project/src/native_gpu/texture_copy.h b/project/src/native_gpu/texture_copy.h
 index 47f8765..8fa6635 100644
 --- a/project/src/native_gpu/texture_copy.h

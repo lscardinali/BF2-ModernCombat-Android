@@ -19,8 +19,9 @@ No game code or data is in this repository. You need your own Xbox 360 USA disc 
 | Recompile `default.xex`, compile the generated code for arm64 | done |
 | Headless harness on device: intro movies, main menu, attract movie, at the game's 30 fps | done |
 | Headless harness on device: first mission, CPU-only speed in play | todo |
-| APK shell: import, audio, gamepads | todo |
-| Vulkan renderer | todo |
+| APK: SDL activity, audio, gamepads, touch (1 finger A, 2 fingers START) | done; game files by `adb`, no import screen yet |
+| Vulkan renderer: the port's HLSL through glslang, intro movies on screen with sound | done |
+| Vulkan renderer: menus and gameplay | todo |
 
 ## Layout
 
@@ -35,7 +36,8 @@ No game code or data is in this repository. You need your own Xbox 360 USA disc 
 | `harness/` | the adb executables: the smoke test, the game with a null renderer |
 | `src/` | stand ins for the PC settings screen and Win32 |
 | `patches/sdk-*.patch`, `patches/bf2-*.patch` | this port's changes to the SDK (on top of the PC port's FPSCR patch) and to the PC port |
-| `android/` | the Android Studio project, still blank |
+| `android/` | the APK: SDL3 activity, `app/src/main/cpp` is the native host and the Vulkan renderer |
+| `tools/run_app.ps1`, `tools/capture_app.ps1` | installs and runs the APK; captures one frame's draws and targets |
 
 ## Build and run
 
@@ -59,4 +61,5 @@ tools/run_smoke.ps1
 - `gpu_hooks.cpp` and `game_natives.cpp` hard-coded the Windows +0x1000 for addresses from 0xE0000000. On Linux the view already includes it (`PhysicalHostOffset`), so GPU callbacks were written 4 KB off and never ran: the movie player's frame queue filled and it waited forever.
 - A guest thread that suspends itself after another thread has already resumed it must not sleep: on Windows the count wraps and cancels out, and the POSIX path now does the same.
 - `harness/trace_hooks.cpp` (`BF2_TRACE=<s>`), `src/thread_dump.cpp` (`BF2_DUMP_AFTER=<s>`) and `tools/gen_calls.py` are how those two were found: debuggerd needs root on a release phone.
+- glslang ignores `[[vk::binding]]` under HLSL register mapping, and shifts a ByteAddressBuffer as a texture, not as a storage buffer. `tools/spv_bindings.py` prints where things landed.
 - `build_harness.ps1` leaves `$ErrorActionPreference` alone: CMake writes warnings to stderr, and `Stop` turns them into failures.

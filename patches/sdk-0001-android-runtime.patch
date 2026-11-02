@@ -373,7 +373,7 @@ index 6782cce..52a8a3d 100644
    SDL_PropertiesID props = SDL_GetWindowProperties(sdl_window_);
    if (allowed_types & Surface::kTypeFlag_WaylandSurface) {
 diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
-index f102b56..e4a3735 100644
+index f102b56..29a411e 100644
 --- a/thirdparty/CMakeLists.txt
 +++ b/thirdparty/CMakeLists.txt
 @@ -126,7 +126,7 @@ target_compile_options(aes128 PRIVATE -w)
@@ -414,3 +414,17 @@ index f102b56..e4a3735 100644
      set(SDL_X11               ON  CACHE BOOL "" FORCE)
      set(SDL_WAYLAND           ON  CACHE BOOL "" FORCE)
      set(SDL_ALSA              ON  CACHE BOOL "" FORCE)
+@@ -330,7 +332,12 @@ if(REXGLUE_USE_VULKAN)
+     # glslang/SPIRV - SPIR-V code generation for shader translation
+     set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "" FORCE)
+     set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+-    set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
++    # the Android renderer compiles the translator's HLSL on the device
++    if(ANDROID)
++        set(ENABLE_HLSL ON CACHE BOOL "" FORCE)
++    else()
++        set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
++    endif()
+     set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+     set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+     set(SKIP_GLSLANG_INSTALL ON CACHE BOOL "" FORCE)

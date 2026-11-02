@@ -47,3 +47,31 @@ index a245717..5a9ecd6 100644
    imm.code.assign(src, src + size);
    ++imm.generation;
    static std::atomic<int> logs{0};
+diff --git a/project/src/native_gpu/texture_copy.h b/project/src/native_gpu/texture_copy.h
+index 47f8765..8fa6635 100644
+--- a/project/src/native_gpu/texture_copy.h
++++ b/project/src/native_gpu/texture_copy.h
+@@ -1,7 +1,7 @@
+ #pragma once
+ #include <cstdint>
+ #include <cstring>
+-#include <emmintrin.h>
++#include <simde/x86/sse2.h>
+ 
+ namespace bf2n {
+ // Exact equivalent of byte reads at ((address+i)^endian_xor)&physical_mask.
+@@ -22,10 +22,10 @@ inline void CopyTextureRow(const uint8_t* memory, uint32_t address, uint32_t byt
+       --bytes;
+       continue;
+     }
+-    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(memory + address));
+-    if (endian_xor & 1) v = _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));
+-    if (endian_xor & 2) v = _mm_or_si128(_mm_slli_epi32(v, 16), _mm_srli_epi32(v, 16));
+-    _mm_storeu_si128(reinterpret_cast<__m128i*>(output), v);
++    simde__m128i v = simde_mm_loadu_si128(reinterpret_cast<const simde__m128i*>(memory + address));
++    if (endian_xor & 1) v = simde_mm_or_si128(simde_mm_slli_epi16(v, 8), simde_mm_srli_epi16(v, 8));
++    if (endian_xor & 2) v = simde_mm_or_si128(simde_mm_slli_epi32(v, 16), simde_mm_srli_epi32(v, 16));
++    simde_mm_storeu_si128(reinterpret_cast<simde__m128i*>(output), v);
+     address += 16; output += 16; bytes -= 16;
+   }
+ }

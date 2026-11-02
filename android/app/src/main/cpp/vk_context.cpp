@@ -34,7 +34,7 @@ bool Context::Init(SDL_Window* window) {
 
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "Battlefield 2: Modern Combat";
-    app.apiVersion = VK_API_VERSION_1_3;
+    app.apiVersion = force_vulkan_11 ? VK_API_VERSION_1_1 : VK_API_VERSION_1_3;
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = uint32_t(ext.size());
@@ -87,33 +87,73 @@ bool Context::Init(SDL_Window* window) {
     want.independentBlend = features.independentBlend;
     want.depthClamp = features.depthClamp;
     want.textureCompressionBC = features.textureCompressionBC;
-    if (props.apiVersion < VK_API_VERSION_1_3) {
-        REXLOG_ERROR("vulkan: {} has Vulkan {}.{}, the renderer needs 1.3", props.deviceName,
+    if (props.apiVersion < VK_API_VERSION_1_1) {
+        REXLOG_ERROR("vulkan: {} has Vulkan {}.{}, the renderer needs 1.1", props.deviceName,
              VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion));
         return false;
     }
-    const char* dev_ext[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-    VkPhysicalDeviceVulkan12Features f12_have{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    f2.pNext = &f12_have;
-    vkGetPhysicalDeviceFeatures2(gpu, &f2);
-    mirror_clamp = f12_have.samplerMirrorClampToEdge;
+    const uint32_t api = force_vulkan_11 ? VK_API_VERSION_1_1 : props.apiVersion;
+    uint32_t n_dev_ext = 0;
+    vkEnumerateDeviceExtensionProperties(gpu, nullptr, &n_dev_ext, nullptr);
+    std::vector<VkExtensionProperties> have_ext(n_dev_ext);
+    vkEnumerateDeviceExtensionProperties(gpu, nullptr, &n_dev_ext, have_ext.data());
+    auto has_ext = [&](const char* name) {
+        for (const auto& e : have_ext)
+            if (std::strcmp(e.extensionName, name) == 0) return true;
+        return false;
+    };
+    std::vector<const char*> dev_ext = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    const bool core13 = api >= VK_API_VERSION_1_3;
+    if (!core13) {
+        // VK_KHR_dynamic_rendering and what it depends on, for drivers older than 1.3
+        for (const char* e : {VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME,
+                              VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME, VK_KHR_MULTIVIEW_EXTENSION_NAME,
+                              VK_KHR_MAINTENANCE_2_EXTENSION_NAME}) {
+            if (!has_ext(e)) {
+                REXLOG_ERROR("vulkan: {} has Vulkan {}.{} without {}: dynamic rendering is required", props.deviceName,
+                             VK_API_VERSION_MAJOR(api), VK_API_VERSION_MINOR(api), e);
+                return false;
+            }
+            dev_ext.push_back(e);
+        }
+    }
+    const bool core12 = api >= VK_API_VERSION_1_2;
+    format_list = core12 || has_ext(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
+    if (!core12 && format_list) dev_ext.push_back(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
+    if (!core12 && has_ext(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME)) {
+        dev_ext.push_back(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
+        mirror_clamp = VK_TRUE;
+    }
+    REXLOG_INFO("vulkan: rendering through {}", core13 ? "Vulkan 1.3" : "VK_KHR_dynamic_rendering");
     VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    f12.samplerMirrorClampToEdge = mirror_clamp;
+    if (core12) {
+        VkPhysicalDeviceVulkan12Features f12_have{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        f2.pNext = &f12_have;
+        vkGetPhysicalDeviceFeatures2(gpu, &f2);
+        mirror_clamp = f12_have.samplerMirrorClampToEdge;
+        f12.samplerMirrorClampToEdge = mirror_clamp;
+    }
     VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     f13.pNext = &f12;
     f13.dynamicRendering = VK_TRUE;
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR fdr{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
+    fdr.dynamicRendering = VK_TRUE;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-    dci.pNext = &f13;
+    dci.pNext = core13 ? static_cast<void*>(&f13) : core12 ? static_cast<void*>(&f12) : nullptr;
+    if (!core13) {
+        fdr.pNext = const_cast<void*>(dci.pNext);
+        dci.pNext = &fdr;
+    }
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = 1;
-    dci.ppEnabledExtensionNames = dev_ext;
+    dci.enabledExtensionCount = uint32_t(dev_ext.size());
+    dci.ppEnabledExtensionNames = dev_ext.data();
     dci.pEnabledFeatures = &want;
     VK_CHECK(vkCreateDevice(gpu, &dci, nullptr, &device));
     features = want;
-    if (!LoadVulkan13(device)) {
-        REXLOG_ERROR("vulkan: the driver lacks Vulkan 1.3 commands");
+    if (!LoadDynamicRendering(device, core13)) {
+        REXLOG_ERROR("vulkan: the driver lacks the dynamic rendering commands");
         return false;
     }
     vkGetDeviceQueue(device, queue_family, 0, &queue);

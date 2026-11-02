@@ -21,7 +21,9 @@ No game code or data is in this repository. You need your own Xbox 360 USA disc 
 | Headless harness on device: first mission, CPU-only speed in play | todo |
 | APK: SDL activity, audio, gamepads, touch (1 finger A, 2 fingers START) | done; game files by `adb`, no import screen yet |
 | Vulkan renderer: the port's HLSL through glslang, intro movies on screen with sound | done |
-| Vulkan renderer: menus and gameplay | todo |
+| Vulkan renderer: menus and the first mission (In and Out), played with a pad script | done; about 6-11 fps on the Mali-G57 at half resolution, by scene |
+| Vulkan 1.1 and 1.2 drivers, through VK_KHR_dynamic_rendering | path forced and run on the Mali-G57; no Adreno device tried yet |
+| In-app game import, settings screen, touch controls for play | todo |
 
 ## Layout
 
@@ -49,6 +51,14 @@ tools/fetch_deps.ps1
 tools/build_harness.ps1
 tools/run_smoke.ps1
 ```
+
+## Device tiers
+
+On phones with 4 GB of memory or less the renderer draws at half resolution, caps mipmapped textures at 256, evicts unused textures over 192 MB, uses plain multiplies and cheaper filtering, and bloom is off. Above 4 GB: full resolution, textures up to 1024, a 768 MB budget, everything on. `user/scale` and `user/max_texture` in the app's files override the first two. The target is Snapdragon 865 and newer; only the Mali-G57 phone has been tried.
+
+## Measuring
+
+Files in the app's `files/user` folder switch these on: `gpu_times` (GPU time of each pass, every 150 frames), `capture` (a frame number: its draws logged, its targets dumped, `tools/capture_app.ps1`), `dump_stacks`, `audio_log`, `pcm_dump`, `force_vulkan_11`.
 
 ## Notes from bring-up
 

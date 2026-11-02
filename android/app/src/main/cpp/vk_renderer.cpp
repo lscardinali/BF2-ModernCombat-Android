@@ -667,6 +667,21 @@ class Renderer {
   uint32_t last_front_base_ = 0;
   uint32_t pipelines_saved_ = 0;
   double wait_ms_ = 0;  // waiting for the GPU and the display, since the last log
+  // user/gpu_times: every 150 frames, what each pass of a frame took on the GPU
+  struct PassTime {
+    uint32_t width, height, draws, format;
+    bool depth;
+  };
+  static constexpr uint32_t kMaxTimedPasses = 62;
+  VkQueryPool gpu_queries_[vk::kFramesInFlight] = {};
+  std::vector<PassTime> gpu_passes_[vk::kFramesInFlight];
+  uint32_t gpu_frame_[vk::kFramesInFlight] = {};
+  bool gpu_times_ = false;
+  bool timing_this_frame_ = false;
+  uint32_t pass_draws_ = 0;
+  uint32_t pass_format_ = 0;
+  bool pass_depth_ = false;
+  void GpuTimesRead(uint32_t slot);
 
   // host-visible rings: slot frame_index of each
   VkBuffer vertex_ = VK_NULL_HANDLE, uniform_ = VK_NULL_HANDLE, index_ = VK_NULL_HANDLE;
@@ -803,6 +818,13 @@ bool Renderer::Init() {
   dump_hlsl_ = capture_frame_ != 0;
   if (watch_.Start()) REXLOG_INFO("bf2native: write watch on");
   present_pipeline_ = UtilPipeline(util_present_, c.swap_format);
+  gpu_times_ = std::filesystem::exists(g_user_dir / "gpu_times", ec);
+  if (gpu_times_) {
+    VkQueryPoolCreateInfo qp{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qp.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qp.queryCount = kMaxTimedPasses + 2;
+    for (auto& q : gpu_queries_) VK_CHECK(vkCreateQueryPool(c.device, &qp, nullptr, &q));
+  }
   present_thread_ = std::thread([this] { PresentThread(); });
   BeginFrame();
   CreateFallbacks();
@@ -846,11 +868,41 @@ void Renderer::PresentThread() {
   }
 }
 
+void Renderer::GpuTimesRead(uint32_t slot) {
+  auto& passes = gpu_passes_[slot];
+  if (passes.empty()) return;
+  uint64_t stamps[kMaxTimedPasses + 2] = {};
+  const uint32_t n = uint32_t(passes.size()) + 1;
+  if (vkGetQueryPoolResults(dev(), gpu_queries_[slot], 0, n, sizeof(stamps), stamps, sizeof(uint64_t),
+                            VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+    passes.clear();
+    return;
+  }
+  const double ns = Get().props.limits.timestampPeriod;
+  std::string line;
+  for (uint32_t i = 0; i < passes.size(); ++i) {
+    const PassTime& k = passes[i];
+    line += fmt::format(" {}x{}{}f{} {}d {:.1f}ms |", k.width, k.height, k.depth ? "z" : "", k.format, k.draws, double(stamps[i + 1] - stamps[i]) * ns / 1e6);
+  }
+  REXLOG_INFO("gpu frame {}: total {:.1f} ms:{}", gpu_frame_[slot], double(stamps[n - 1] - stamps[0]) * ns / 1e6, line);
+  passes.clear();
+}
+
 void Renderer::BeginFrame() {
   auto& c = Get();
   const auto wait_start = std::chrono::steady_clock::now();
   WaitPresented(c.frame_index);
   c.Begin();
+  if (gpu_times_) {
+    GpuTimesRead(c.frame_index);
+    timing_this_frame_ = frame_ % 150 == 0;
+    if (timing_this_frame_) {
+      VkCommandBuffer pre = c.Current().pre;
+      vkCmdResetQueryPool(pre, gpu_queries_[c.frame_index], 0, kMaxTimedPasses + 2);
+      vkCmdWriteTimestamp(c.Current().cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, gpu_queries_[c.frame_index], 0);
+      gpu_frame_[c.frame_index] = frame_;
+    }
+  }
   wait_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count();
   uint32_t fi = c.frame_index;
   pool_index_[fi] = 0;
@@ -1203,7 +1255,7 @@ HostRT* Renderer::GetRT(uint32_t base, uint32_t format, uint32_t w, uint32_t h, 
   VkImageFormatListCreateInfo format_list{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
   format_list.viewFormatCount = 2;
   format_list.pViewFormats = view_formats;
-  if (rgba8) ici.pNext = &format_list;
+  if (rgba8 && Get().format_list) ici.pNext = &format_list;
   ici.imageType = VK_IMAGE_TYPE_2D;
   ici.format = rt.format;
   ici.extent = {rt.host_width, rt.host_height, 1};
@@ -1281,6 +1333,13 @@ void Renderer::EndPass() {
   if (!pass_open_) return;
   vkCmdEndRendering(Cmd());
   AllBarrier(Cmd());
+  if (timing_this_frame_) {
+    auto& passes = gpu_passes_[Get().frame_index];
+    if (passes.size() < kMaxTimedPasses) {
+      passes.push_back({pass_w_, pass_h_, pass_draws_, pass_format_, pass_depth_});
+      vkCmdWriteTimestamp(Cmd(), VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_queries_[Get().frame_index], uint32_t(passes.size()));
+    }
+  }
   pass_open_ = false;
   bound_pipeline_ = VK_NULL_HANDLE;
   bound_set_ = VK_NULL_HANDLE;
@@ -1332,6 +1391,9 @@ void Renderer::BeginPass(const Targets& t) {
   pass_w_ = w;
   pass_h_ = h;
   ++frame_passes_;
+  pass_draws_ = 0;
+  pass_format_ = t.color[0] ? t.color[0]->guest_format : 99;
+  pass_depth_ = t.depth != nullptr;
 }
 
 // A target about to be read: its waiting clear has to happen first.
@@ -2327,6 +2389,7 @@ void Renderer::Draw(uint32_t device, uint32_t prim, std::vector<uint32_t>& vids,
   }
   // --- Record.
   BeginPass(t);
+  ++pass_draws_;
   VkCommandBuffer cmd = Cmd();
   if (pipeline != bound_pipeline_) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

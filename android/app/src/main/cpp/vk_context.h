@@ -1,6 +1,7 @@
 #pragma once
 // The Vulkan device the renderer draws with: instance, the window's surface, one graphics+present queue, the swapchain
-// and the frames in flight. Dynamic rendering (1.3): the Unisoc/Mali phone and the Retroid Pocket 6's Adreno both have it.
+// and the frames in flight. It renders with dynamic rendering: core in Vulkan 1.3, VK_KHR_dynamic_rendering from 1.1 up,
+// which is what older Adreno drivers report.
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
@@ -45,6 +46,8 @@ public:
     VkPhysicalDeviceMemoryProperties memory{};
     VkCommandPool pool = VK_NULL_HANDLE;
     VkBool32 mirror_clamp = VK_FALSE;  // samplerMirrorClampToEdge
+    bool format_list = false;           // VkImageFormatListCreateInfo can be used
+    bool force_vulkan_11 = false;       // tests the older drivers' path on a newer one; set before Init
 
     // swapchain
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -84,7 +87,7 @@ private:
 
 Context& Get();
 
-// vk_loader13.cpp: the Vulkan 1.3 commands Android's loader does not export
-bool LoadVulkan13(VkDevice device);
+// vk_loader13.cpp: the dynamic rendering commands Android's loader does not export
+bool LoadDynamicRendering(VkDevice device, bool core);
 
 }  // namespace vk

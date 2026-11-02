@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
   REXLOG_INFO("android: game in {}", game.string());
 
   SDL_Window* window = SDL_CreateWindow("Battlefield 2: Modern Combat", 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_VULKAN);
+  vk::Get().force_vulkan_11 = fs::exists(user / "force_vulkan_11", ec);
   if (!window || !vk::Get().Init(window)) {
     Fail(std::string("Vulkan failed to start: ") + SDL_GetError());
     return 1;

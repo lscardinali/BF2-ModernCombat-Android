@@ -22,7 +22,10 @@ class SdlPadDriver final : public rex::input::InputDriver {
   };
   static_assert(sizeof(State) <= 16);
 
-  SdlPadDriver() : rex::input::InputDriver(nullptr, 0) {}
+  // two_players: the pad is a real device, which takes guest user 0 (the SDK numbers those in the order they are listed,
+  // synthetic ones all feed user 0), so the next device listed is user 1. second: that next device is the second pad.
+  explicit SdlPadDriver(bool two_players = false, bool second = false)
+      : rex::input::InputDriver(nullptr, 0), two_players_(two_players), second_(second) {}
   // which: 0 every pad and the touch screen together, 1 and 2 the split screen's players
   static void Publish(int which, const State& s) {
     uint64_t a, b = 0;
@@ -39,14 +42,20 @@ class SdlPadDriver final : public rex::input::InputDriver {
     info.id = kId;
     info.name = "Android pad";
     info.guid = "android";
-    info.synthetic = true;
+    info.synthetic = !two_players_;
     out.push_back(info);
+    if (second_) {
+      info.id = kSecondId;
+      info.guid = "android2";
+      info.synthetic = false;
+      out.push_back(info);
+    }
   }
 
   X_RESULT GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) override {
-    if (id != kId) return X_ERROR_DEVICE_NOT_CONNECTED;
+    if (id != kId && id != kSecondId) return X_ERROR_DEVICE_NOT_CONNECTED;
     const int side = bf2n::SplitSide();
-    State s = Read(side < 0 ? 0 : side + 1);
+    State s = Read(id == kSecondId ? 2 : side < 0 ? 0 : side + 1);
     std::memset(out, 0, sizeof(*out));
     out->packet_number = ++packet_;
     out->gamepad.buttons = s.buttons;
@@ -60,7 +69,7 @@ class SdlPadDriver final : public rex::input::InputDriver {
   }
 
   X_RESULT GetDeviceCapabilities(rex::input::DeviceId id, uint32_t, rex::input::X_INPUT_CAPABILITIES* out) override {
-    if (id != kId) return X_ERROR_DEVICE_NOT_CONNECTED;
+    if (id != kId && id != kSecondId) return X_ERROR_DEVICE_NOT_CONNECTED;
     std::memset(out, 0, sizeof(*out));
     out->type = 0x01;
     out->sub_type = 0x01;
@@ -75,7 +84,7 @@ class SdlPadDriver final : public rex::input::InputDriver {
   }
 
   X_RESULT SetDeviceVibration(rex::input::DeviceId id, rex::input::X_INPUT_VIBRATION*) override {
-    return id == kId ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+    return id == kId || id == kSecondId ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   // Edge events for the title screen and menus, which read XInputGetKeystroke.
@@ -107,6 +116,8 @@ class SdlPadDriver final : public rex::input::InputDriver {
 
  private:
   static constexpr rex::input::DeviceId kId = static_cast<rex::input::DeviceId>(0x5C21F8);
+  static constexpr rex::input::DeviceId kSecondId = static_cast<rex::input::DeviceId>(0x5C21F9);
+  bool two_players_ = false, second_ = false;
   // VK_PAD_* by bit of X_INPUT_GAMEPAD::buttons, then LT/RT
   static constexpr uint16_t kVk[18] = {0x5810, 0x5811, 0x5812, 0x5813, 0x5814, 0x5815, 0x5816, 0x5817, 0x5805,
                                        0x5804, 0,      0,      0x5800, 0x5801, 0x5802, 0x5803, 0x5806, 0x5807};

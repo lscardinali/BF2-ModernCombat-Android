@@ -80,9 +80,11 @@ Known problems:
 
 ### Spike: a real second player
 
-Setting `BF2_SPLIT2` as well as turning split screen on tries a design without hand-overs, on the Windows build (`split_screen.cpp`). The game thread fills a frame packet (`0x8287A4FC`: +2452 written, +2448 drawn) and hands it to the render thread in `sub_82347190`. Running `sub_82298D20` a second time with no time passing builds a second packet of the same moment for the other half, and game time stays real. The camera object is at `[0x8284F8D8]+48`: +304 projection, +432 view, +624 world. `sub_8219B998` spawns a player, so a second controller from `sub_821C5928` gets a soldier of its own.
+Setting `BF2_SPLIT2` as well as turning split screen on tries a design without hand-overs, on the Windows build (`split_screen.cpp`). The game thread fills a frame packet (`0x8287A4FC`: +2452 written, +2448 drawn) and hands it to the render thread in `sub_82347190`. Running `sub_82298D20` a second time with no time passing builds a second packet of the same moment for the other half, and game time stays real. The camera object is at `[0x8284F8D8]+48`: +304 projection, +432 view, +624 world. Once the first player has landed, a second controller from `sub_821C5928` takes over a teammate through `sub_8219A118`, and is updated believing it is the human player. Its pad is the guest's user 1: `SdlPadDriver` lists real devices so the second pad gets that number, and `pads/win_p2_walk.txt` with `run_windows.ps1 -Script2` stands in for it.
 
-What it showed: first-person guns and animations are fine in the first view, the second view draws from its own camera, and both controllers update. It's not playable: no pad reaches the second controller yet, the second view borrows the first camera's rotation and shows no gun, both soldiers spawn in one spot, and the one run with the camera at the second soldier crashed in `sub_821A0208` (a null soldier) soon after the players died.
+Spawning a new soldier for player 2 doesn't work: `sub_8219B998` crashes in the soldier's constructor in the middle of a mission, and one spawned while the level loads fell through the ground and then crashed the game in `sub_821A0208`.
+
+What works, on this PC: both views with their own soldier, gun and HUD, at normal game time, for runs of about two minutes, and the second pad's stick and trigger reach the game's input state. It isn't playable: the second soldier doesn't walk or fire. About 96 functions read the human controller global, and the suspect is game code running outside the second controller's update that doesn't count that soldier as a player, not confirmed. The second view also borrows the first camera's rotation.
 
 ## Windows test build
 

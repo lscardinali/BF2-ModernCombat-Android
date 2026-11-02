@@ -2,7 +2,7 @@
 # stack at the end (cdb, non-invasive: the game keeps its state). Everything lands in out/runs/<Name>.
 #   tools/run_windows.ps1 [-Name run] [-Seconds 60] [-Script pads/menus.txt] [-Split] [-ScriptPlayer 1] [-Shots 10,30,60] [-Stacks] [-Validate]
 param([string]$Name = 'win', [int]$Seconds = 60, [string]$Script = '', [switch]$Split, [int]$ScriptPlayer = -1,
-      [int[]]$Shots = @(), [switch]$Stacks, [switch]$Validate, [switch]$Debugger, [string]$CdbExtra = '')
+      [int[]]$Shots = @(), [switch]$Stacks, [switch]$Validate, [switch]$Debugger, [string]$CdbExtra = '', [string]$Script2 = '')
 $Root = Split-Path -Parent $PSScriptRoot
 Get-Process bf2mc, cdb -ErrorAction SilentlyContinue | Stop-Process -Force
 Get-Process bf2mc -ErrorAction SilentlyContinue | Wait-Process -Timeout 20 -ErrorAction SilentlyContinue
@@ -10,7 +10,8 @@ $Exe = "$Root\out\windows\bf2mc.exe"
 $User = "$Root\out\windows\user"
 $Out = "$Root\out\runs\$Name"
 New-Item -ItemType Directory -Force $Out, $User | Out-Null
-Remove-Item -Recurse -Force "$User\logs", "$User\script.txt", "$User\split_script_player" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force "$User\logs", "$User\script.txt", "$User\script2.txt", "$User\split_script_player" -ErrorAction SilentlyContinue
+if ($Script2) { Copy-Item "$Root\$Script2" "$User\script2.txt" }
 if ($Script) { Copy-Item "$Root\$Script" "$User\script.txt" }
 if ($ScriptPlayer -ge 0) { Set-Content "$User\split_script_player" $ScriptPlayer -Encoding ascii }
 Set-Content "$User\settings.toml" "split_screen = $($Split.IsPresent.ToString().ToLower())" -Encoding ascii

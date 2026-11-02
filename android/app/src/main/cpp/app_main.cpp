@@ -103,6 +103,42 @@ class OnePlayerDriver final : public rex::input::InputDriver {
   int player_;
 };
 
+// Test aid: user/script2.txt is the guest's user 1, standing in for a second pad.
+class SecondUserDriver final : public rex::input::InputDriver {
+ public:
+  explicit SecondUserDriver(std::string path) : rex::input::InputDriver(nullptr, 0), inner_(std::move(path)) {
+    std::vector<rex::input::DeviceInfo> devices;
+    inner_.EnumerateDevices(devices);
+    inner_id_ = devices[0].id;
+  }
+  X_STATUS Setup() override { return inner_.Setup(); }
+  void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override {
+    rex::input::DeviceInfo info;
+    info.id = kId;
+    info.name = "Script pad 2";
+    info.guid = "script2";
+    info.synthetic = false;
+    out.push_back(info);
+  }
+  X_RESULT GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) override {
+    return id == kId ? inner_.GetDeviceState(inner_id_, out) : X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  X_RESULT GetDeviceCapabilities(rex::input::DeviceId id, uint32_t flags, rex::input::X_INPUT_CAPABILITIES* out) override {
+    return id == kId ? inner_.GetDeviceCapabilities(inner_id_, flags, out) : X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  X_RESULT SetDeviceVibration(rex::input::DeviceId id, rex::input::X_INPUT_VIBRATION* v) override {
+    return id == kId ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  X_RESULT GetDeviceKeystroke(rex::input::DeviceId id, uint32_t, rex::input::X_INPUT_KEYSTROKE*) override {
+    return id == kId ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+
+ private:
+  static constexpr rex::input::DeviceId kId = static_cast<rex::input::DeviceId>(0x5C21FA);
+  ScriptInputDriver inner_;
+  rex::input::DeviceId inner_id_{};
+};
+
 void PublishPad() {
   SdlPadDriver::State s, player[2];
   int count = 0;
@@ -229,10 +265,17 @@ int main(int argc, char** argv) {
   std::string script = fs::exists(user / "script.txt", ec) ? (user / "script.txt").string() : "";
   int script_player = -1;
   if (std::ifstream f(user / "split_script_player"); f) f >> script_player;
-  config.input_factory = [script, script_player](bool) -> std::unique_ptr<rex::system::IInputSystem> {
+  std::string script2 = fs::exists(user / "script2.txt", ec) ? (user / "script2.txt").string() : "";
+  config.input_factory = [script, script2, script_player](bool) -> std::unique_ptr<rex::system::IInputSystem> {
     auto input = std::make_unique<rex::input::InputSystem>(nullptr);
     input->SetDeviceAssignment(std::make_unique<rex::input::SlotAssignment>());  // no pads without one
-    input->AddDriver(std::make_unique<SdlPadDriver>());
+    const bool two_players = std::getenv("BF2_SPLIT2") != nullptr;
+    input->AddDriver(std::make_unique<SdlPadDriver>(two_players, two_players && script2.empty()));
+    if (!script2.empty()) {
+      auto driver = std::make_unique<SecondUserDriver>(script2);
+      driver->Setup();
+      input->AddDriver(std::move(driver));
+    }
     if (!script.empty()) {
       auto driver = std::make_unique<ScriptInputDriver>(script);
       driver->Setup();

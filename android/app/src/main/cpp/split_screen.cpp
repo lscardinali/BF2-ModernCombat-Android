@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -61,6 +62,11 @@ constexpr uint32_t kRenderFrames = 0x8287A4FC;  // the two frame packets: +2448 
 bool g_second_pass = false;                     // game thread
 std::atomic<int> g_packet_side[2] = {};
 uint32_t g_controller[2] = {};                  // game thread
+constexpr uint32_t kActiveUser = 0x82815D84;    // the pad the game's one input state reads (sub_823063F0)
+constexpr uint32_t kRescanCounter = 0x828775C4;
+uint32_t g_device = 0;
+uint32_t g_input_state = 0;                     // +4 of the object sub_823063F0 runs on
+double g_input_dt = 0.0;
 
 bool SecondPassOn() {
   static const bool on = std::getenv("BF2_SPLIT2") != nullptr;
@@ -77,6 +83,34 @@ uint32_t PlayerList(PPCContext& ctx, uint8_t* base) {
   const uint32_t players = Load32(base, ctx.r3.u32 + 32);
   ctx = saved;
   return players;
+}
+
+// The input state's update, which reads the active user's pad.
+void PollInput(PPCContext& ctx, uint8_t* base, uint32_t user) {
+  rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, kActiveUser), user);
+  if (!g_input_state) return;
+  PPCContext saved = ctx;
+  // The device itself is only read while the game scans for the active pad, which is pinned now: as in sub_823063F0.
+  ctx.r3.u64 = Load32(base, 0x8284F540);
+  sub_822A8D98(ctx, base);
+  const uint32_t devices = ctx.r3.u32;
+  auto device_call = [&](uint32_t object, uint32_t slot) {
+    ctx.r3.u64 = object;
+    ctx.r4.u64 = user;
+    ctx.ctr.u64 = Load32(base, Load32(base, object) + slot);
+    REX_CALL_INDIRECT_FUNC(ctx.ctr.u32);
+    return ctx.r3.u32;
+  };
+  device_call(devices, 12);
+  g_device = device_call(devices, 20);
+  if (g_device) device_call(g_device, 4);
+  device_call(devices, 16);
+  ctx = saved;
+  ctx.r3.u64 = g_input_state;
+  ctx.f1.f64 = g_input_dt;
+  ctx.ctr.u64 = Load32(base, Load32(base, g_input_state) + 8);
+  REX_CALL_INDIRECT_FUNC(ctx.ctr.u32);
+  ctx = saved;
 }
 
 void SetHuman(uint8_t* base, uint32_t players, uint32_t controller) {
@@ -168,44 +202,133 @@ REX_HOOK_RAW(sub_82346538) {  // the render thread's frame: draws everything, th
 REX_HOOK_RAW(sub_8219D5D8) {
   const uint32_t controller = ctx.r3.u32;
   if (SplitOn() && !SecondPassOn() && controller == Load32(base, kHumanController)) Update(ctx, base, controller);
-  if (!SecondPassOn() || !g_controller[1]) {
+  if (!SecondPassOn() || !g_controller[0]) {
     __imp__sub_8219D5D8(ctx, base);
     return;
   }
-  // Spike: the second controller runs believing it is the human player.
   const bool second = controller == g_controller[1];
-  const uint32_t players = PlayerList(ctx, base);
-  const uint32_t human = Load32(base, kHumanController);
-  if (second) SetHuman(base, players, controller);
-  __imp__sub_8219D5D8(ctx, base);
-  if (second) SetHuman(base, players, human);
-}
-
-// Spike: the mission's human player spawns (sub_822323C8), and a second one with a soldier of its own right after it.
-REX_HOOK_RAW(sub_8219B998) {
-  static bool spawning = false;
-  if (!SecondPassOn() || spawning) {
-    __imp__sub_8219B998(ctx, base);
+  if (controller != g_controller[0] && !second) {
+    __imp__sub_8219D5D8(ctx, base);
     return;
   }
+  // The second view's pass moves no time: input was handled in the first one, and would count twice.
+  if (g_second_pass) return;
+  if (!second) {
+    __imp__sub_8219D5D8(ctx, base);
+    return;
+  }
+  // The second controller runs believing it is the human player, reading the other pad.
+  const uint32_t players = PlayerList(ctx, base);
+  const uint32_t human = Load32(base, kHumanController);
+  const uint32_t active = Load32(base, kActiveUser);
+  SetHuman(base, players, controller);
+  PollInput(ctx, base, active == 1 ? 0 : 1);
+  static int updates = 0;
+  if (++updates % 120 == 0) {
+    uint32_t mask = 0;
+    if (g_input_state) mask = Load32(base, g_input_state + 4);
+    REXLOG_INFO("split2: second pad: update {}, active {}, input buttons {:08X} sticks {:08X} {:08X}, device {:08X} user {} raw {:08X} {:08X} {:08X}", updates, Load32(base, kActiveUser), mask,
+                g_input_state ? Load32(base, g_input_state + 92) : 0, g_input_state ? Load32(base, g_input_state + 96) : 0, g_device, g_device ? Load32(base, g_device + 4) : 0,
+                g_device ? Load32(base, g_device + 16) : 0, g_device ? Load32(base, g_device + 20) : 0, g_device ? Load32(base, g_device + 24) : 0);
+    REXLOG_INFO("split2: second soldier at {:.1f}", rex::memory::load_and_swap<float>(rex::memory::GuestPtr(base, BodyOf(ctx, base, Load32(base, controller + 56)) + 96)));
+  }
+  __imp__sub_8219D5D8(ctx, base);
+  PollInput(ctx, base, active);
+  SetHuman(base, players, human);
+}
+
+REX_HOOK_RAW(sub_823063F0) {  // the game's pad poll
+  g_input_state = Load32(base, ctx.r3.u32 + 4);
+  g_input_dt = ctx.f1.f64;
+  // Every 8th poll the game makes whichever pad is in use the active one: with two players, each keeps theirs.
+  if (g_controller[1]) rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, kRescanCounter), 0);
+  __imp__sub_823063F0(ctx, base);
+}
+
+// A second human controller, as sub_8219B998 sets one up, takes over a teammate. Building a new soldier isn't an option:
+// that crashes in the middle of a mission, and one spawned while the level loads falls through the ground.
+void AddSecondPlayer(PPCContext& ctx, uint8_t* base, uint32_t first, uint32_t first_soldier, uint32_t target) {
   PPCContext saved = ctx;
-  const uint32_t first = ctx.r3.u32;
-  __imp__sub_8219B998(ctx, base);
-  ctx = saved;
   const uint32_t players = PlayerList(ctx, base);
   ctx.r3.u64 = players;
   sub_821C5928(ctx, base);
   const uint32_t second = ctx.r3.u32;
+  SetHuman(base, players, second);
   ctx = saved;
   ctx.r3.u64 = second;
-  spawning = true;
-  __imp__sub_8219B998(ctx, base);
-  spawning = false;
+  ctx.r4.u64 = target;
+  sub_8219A118(ctx, base);
+  ctx = saved;
+  ctx.r3.u64 = second;
+  ctx.r4.u64 = 0;
+  sub_821B07B0(ctx, base);
+  ctx = saved;
+  ctx.r3.u64 = 28;
+  ctx.r4.u64 = 0;
+  sub_822BCCA8(ctx, base);
+  const uint32_t helper = ctx.r3.u32;
+  if (helper) {
+    ctx.r4.u64 = second;
+    sub_8262DD18(ctx, base);
+    rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, second + 324), helper);
+    ctx.r3.u64 = helper;
+    sub_8262DDE8(ctx, base);
+  }
+  ctx = saved;
+  ctx.r3.u64 = second;
+  ctx.r4.u64 = second + 192;
+  sub_821996E8(ctx, base);
+  ctx = saved;
+  sub_82635B20(ctx, base);
+  rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, second + 328), ctx.r3.u32);
+  ctx = saved;
+  sub_82635B10(ctx, base);
+  rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, second + 332), ctx.r3.u32);
+  ctx = saved;
+  // The hand-over took the camera and the player's body with it. One from no soldier brings them back to the first player.
   SetHuman(base, players, first);
+  rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, first + 56), 0);
+  ctx.r3.u64 = first;
+  ctx.r4.u64 = first_soldier;
+  sub_8219A118(ctx, base);
+  ctx = saved;
+  if (Load32(base, first + 56) != first_soldier)
+    rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, first + 56), first_soldier);
+  // Both hand-overs ran with no soldier in their controller, and sub_821FAA40 recorded that as the body's owner.
+  const uint32_t controllers[2] = {first, second}, soldiers[2] = {first_soldier, target};
+  for (int i = 0; i < 2; ++i) {
+    const uint32_t body = BodyOf(ctx, base, soldiers[i]);
+    if (!body) continue;
+    rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, body + 184), controllers[i]);
+    rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, body + 188), soldiers[i]);
+  }
+  if (Load32(base, kActiveUser) > 3) rex::memory::store_and_swap<uint32_t>(rex::memory::GuestPtr(base, kActiveUser), 0);
   g_controller[0] = first;
   g_controller[1] = second;
-  REXLOG_INFO("split2: controllers {:08X} and {:08X}, soldiers {:08X} and {:08X}", first, second, Load32(base, first + 56), Load32(base, second + 56));
+  REXLOG_INFO("split2: controllers {:08X} and {:08X}, soldiers {:08X} and {:08X}, second has {:08X}, first player's pad {}", first, second,
+              first_soldier, target, Load32(base, second + 56), Load32(base, kActiveUser));
+}
+
+// Once the first player has landed: their height holds still for half a second and the game offers a teammate.
+void MaybeAddSecondPlayer(PPCContext& ctx, uint8_t* base) {
+  if (g_controller[1] || !InMission(base)) return;
+  const uint32_t first = Load32(base, kHumanController);
+  const uint32_t soldier = first ? Load32(base, first + 56) : 0;
+  const uint32_t body = soldier ? BodyOf(ctx, base, soldier) : 0;
+  if (!body) return;
+  const float height = rex::memory::load_and_swap<float>(rex::memory::GuestPtr(base, body + 100));
+  static int steady = 0;
+  static float last = 0.0f;
+  steady = std::fabs(height - last) < 0.01f ? steady + 1 : 0;
+  last = height;
+  if (steady < 30) return;
+  steady = 0;
+  PPCContext saved = ctx;
+  ctx.r3.u64 = first;
+  sub_8219CA98(ctx, base);
+  const uint32_t target = ctx.r3.u32;
   ctx = saved;
+  if (target && target != soldier && !Flagged(base, target) && BodyOf(ctx, base, target)) AddSecondPlayer(ctx, base, first, soldier, target);
 }
 
 // Spike (BF2_SPLIT2): the game's update once more with no time passing, for a second view of the same moment.
@@ -214,13 +337,27 @@ REX_HOOK_RAW(sub_82298D20) {
     __imp__sub_82298D20(ctx, base);
     return;
   }
+  MaybeAddSecondPlayer(ctx, base);
   PPCContext saved = ctx;
   __imp__sub_82298D20(ctx, base);
   if (!InMission(base)) return;
   ctx = saved;
   ctx.f1.f64 = 0.0;
   const uint32_t players = PlayerList(ctx, base);
-  // Spike: this pass's camera sits at the second soldier's body, looking the way the first camera looks.
+  static int logged = 0;
+  if (g_controller[1] && ++logged % 120 == 0) {
+    float at[2][3] = {};
+    for (int p = 0; p < 2; ++p) {
+      const uint32_t soldier = Load32(base, g_controller[p] + 56);
+      const uint32_t body = soldier ? BodyOf(ctx, base, soldier) : 0;
+      for (int i = 0; body && i < 3; ++i) at[p][i] = rex::memory::load_and_swap<float>(rex::memory::GuestPtr(base, body + 96 + i * 4));
+    }
+    REXLOG_INFO("split2: soldiers at {:.1f} {:.1f} {:.1f} and {:.1f} {:.1f} {:.1f}, camera {:.1f} {:.1f} {:.1f}", at[0][0], at[0][1], at[0][2], at[1][0], at[1][1], at[1][2],
+                rex::memory::load_and_swap<float>(rex::memory::GuestPtr(base, Load32(base, 0x8284F8D8) + 48 + 624 + 48)),
+                rex::memory::load_and_swap<float>(rex::memory::GuestPtr(base, Load32(base, 0x8284F8D8) + 48 + 624 + 52)),
+                rex::memory::load_and_swap<float>(rex::memory::GuestPtr(base, Load32(base, 0x8284F8D8) + 48 + 624 + 56)));
+  }
+  // This pass's camera sits at the second soldier's body, looking the way the first camera looks.
   const uint32_t camera = Load32(base, 0x8284F8D8) + 48;
   auto cam = [&](uint32_t offset, int i) { return rex::memory::GuestPtr(base, camera + offset + i * 4); };
   float kept_view[3], kept_world[3], position[3];
@@ -242,10 +379,6 @@ REX_HOOK_RAW(sub_82298D20) {
         rex::memory::store_and_swap<float>(cam(624, 12 + j), position[j]);
       }
       moved = true;
-      static int logged = 0;
-      if (++logged % 300 == 0)
-        REXLOG_INFO("split2: camera at {:.1f} {:.1f} {:.1f}, second soldier at {:.1f} {:.1f} {:.1f}", kept_world[0], kept_world[1], kept_world[2],
-                    position[0], position[1], position[2]);
     }
     SetHuman(base, players, g_controller[1]);
   }

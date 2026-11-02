@@ -1,10 +1,14 @@
 // SDL3 main for Android: boots the recompiled game from the app's files (<files>/game) on the Vulkan renderer. This
 // thread pumps the events and turns gamepads and touch into the pad (sdl_pad.h). Touch: one finger is A, two are START.
+// The Windows test build (windows/CMakeLists.txt) runs this too: the game is the first game/default.xex found going up
+// from the executable, and user/ is next to the executable.
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
-#include <unistd.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -36,10 +40,40 @@ namespace {
 
 void Fail(const std::string& msg) {
   SDL_Log("%s", msg.c_str());
+  if (std::getenv("BF2_NO_DIALOG")) {  // tools/run_windows.ps1: nobody there to close it
+    std::fprintf(stderr, "%s\n", msg.c_str());
+    return;
+  }
   SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Battlefield 2: Modern Combat", msg.c_str(), nullptr);
 }
 
 int16_t Stick(int16_t v) { return v == -32768 ? int16_t(-32767) : v; }
+
+void SetEnv(const char* name, const std::string& value) {
+#ifdef _WIN32
+  _putenv_s(name, value.c_str());
+#else
+  setenv(name, value.c_str(), 1);
+#endif
+}
+
+// The folder with game/default.xex, empty if there is none.
+fs::path FindGameBase(fs::path& user_base) {
+  std::error_code ec;
+#ifdef __ANDROID__
+  for (const char* dir : {SDL_GetAndroidInternalStoragePath(), SDL_GetAndroidExternalStoragePath()}) {
+    if (dir && fs::exists(fs::path(dir) / "game" / "default.xex", ec)) {
+      user_base = dir;
+      return dir;
+    }
+  }
+#else
+  user_base = SDL_GetBasePath();
+  for (fs::path dir = user_base; !dir.empty() && dir != dir.parent_path(); dir = dir.parent_path())
+    if (fs::exists(dir / "game" / "default.xex", ec)) return dir;
+#endif
+  return {};
+}
 
 // Test aid: the scripted pad drives only one split screen player (user/split_script_player: 0 or 1).
 class OnePlayerDriver final : public rex::input::InputDriver {
@@ -134,34 +168,33 @@ int main(int argc, char** argv) {
     Fail(std::string("SDL failed to start: ") + SDL_GetError());
     return 1;
   }
-  fs::path base;
   std::error_code ec;
-  for (const char* dir : {SDL_GetAndroidInternalStoragePath(), SDL_GetAndroidExternalStoragePath()}) {
-    if (dir && fs::exists(fs::path(dir) / "game" / "default.xex", ec)) {
-      base = dir;
-      break;
-    }
-  }
+  fs::path user_base;
+  const fs::path base = FindGameBase(user_base);
   if (base.empty()) {
+#ifdef __ANDROID__
     const char* in = SDL_GetAndroidInternalStoragePath();
     Fail(std::string("The game files are missing. Copy them to\n") + (in ? in : "?") + "/game");
+#else
+    Fail("The game files are missing: no game/default.xex above " + user_base.string());
+#endif
     return 1;
   }
-  chdir(base.c_str());
-  fs::path game = base / "game", user = base / "user";
+  fs::current_path(user_base, ec);
+  fs::path game = base / "game", user = user_base / "user";
   fs::create_directories(user, ec);
 
-  if (fs::exists(user / "audio_log", ec)) setenv("BF2_AUDIO_LOG", "1", 1);
-  if (fs::exists(user / "pcm_dump", ec)) setenv("BF2_PCM_DUMP", (user / "mix.pcm").c_str(), 1);
+  if (fs::exists(user / "audio_log", ec)) SetEnv("BF2_AUDIO_LOG", "1");
+  if (fs::exists(user / "pcm_dump", ec)) SetEnv("BF2_PCM_DUMP", (user / "mix.pcm").string());
   if (std::ifstream f(user / "settings.toml"); f) {  // written by GameSettings.kt
     for (std::string line; std::getline(f, line);)
-      if (line == "split_screen = true") setenv("BF2_SPLIT", "1", 1);
+      if (line == "split_screen = true") SetEnv("BF2_SPLIT", "1");
   }
   if (std::ifstream f(user / "draw_stacks"); f) {  // a number of seconds: maps two frames after that long
     std::string seconds;
     f >> seconds;
-    setenv("BF2_DRAW_STACKS", seconds.c_str(), 1);
-    setenv("BF2_DRAW_STACKS_FILE", (user / "draw_stacks.txt").c_str(), 1);
+    SetEnv("BF2_DRAW_STACKS", seconds);
+    SetEnv("BF2_DRAW_STACKS_FILE", (user / "draw_stacks.txt").string());
   }
   rex::cvar::Init(argc, argv);
   rex::cvar::ApplyEnvironment();
@@ -172,7 +205,13 @@ int main(int argc, char** argv) {
   rex::InitLogging(log_config);
   REXLOG_INFO("android: game in {}", game.string());
 
+#ifdef __ANDROID__
   SDL_Window* window = SDL_CreateWindow("Battlefield 2: Modern Combat", 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_VULKAN);
+#else
+  SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+  const bool split = std::getenv("BF2_SPLIT") != nullptr;
+  SDL_Window* window = SDL_CreateWindow("Battlefield 2: Modern Combat", split ? 1920 : 1280, split ? 540 : 720, 0);
+#endif
   vk::Get().force_vulkan_11 = fs::exists(user / "force_vulkan_11", ec);
   if (!window || !vk::Get().Init(window)) {
     Fail(std::string("Vulkan failed to start: ") + SDL_GetError());
@@ -236,7 +275,9 @@ int main(int argc, char** argv) {
   }
   main_thread->Resume();
   REXLOG_INFO("android: game thread started");
+#ifndef _WIN32  // on Windows, tools/run_windows.ps1 has the debugger dump them
   if (fs::exists(user / "dump_stacks", ec)) ThreadDumpAfter((user / "stacks.txt").c_str(), 30, 4);
+#endif
 
   for (uint64_t tick = 0;; ++tick) {
     SDL_PumpEvents();
@@ -244,7 +285,7 @@ int main(int argc, char** argv) {
     while (SDL_PeepEvents(&e, 1, SDL_GETEVENT, SDL_EVENT_FIRST, SDL_EVENT_LAST) == 1) {
       if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_TERMINATING) {
         rex::FlushLogging();
-        _exit(0);
+        std::_Exit(0);
       }
     }
     SDL_UpdateGamepads();

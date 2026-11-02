@@ -8,7 +8,7 @@
 // - Uploads go in a command buffer that runs before the frame's, so they split no render pass.
 // - BC textures become RGBA8 on the CPU where the GPU lacks BC.
 #include <SDL3/SDL.h>
-#include <unistd.h>
+#include <SDL3/SDL.h>
 #include <xxhash.h>
 
 #include <algorithm>
@@ -788,7 +788,7 @@ bool Renderer::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffe
 
 bool Renderer::Init() {
   auto& c = Get();
-  const long ram_mb = sysconf(_SC_PHYS_PAGES) / 1024 * sysconf(_SC_PAGESIZE) / 1024;
+  const long ram_mb = SDL_GetSystemRAM();
   const bool low_memory = ram_mb <= 4096;
   scale_ = low_memory ? 0.5f : 1.0f;
   max_texture_ = low_memory ? 256 : 1024;

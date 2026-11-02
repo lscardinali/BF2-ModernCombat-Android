@@ -256,11 +256,12 @@ index a245717..1a1eb74 100644
    if (g_renderer_ready) bf2n::RendererSwap(device, front);
    __imp__sub_82472D10(ctx, base);
 diff --git a/project/src/native_gpu/texture_copy.h b/project/src/native_gpu/texture_copy.h
-index 47f8765..8fa6635 100644
+index 47f8765..6eed6a0 100644
 --- a/project/src/native_gpu/texture_copy.h
 +++ b/project/src/native_gpu/texture_copy.h
-@@ -1,7 +1,7 @@
+@@ -1,7 +1,8 @@
  #pragma once
++#include <cmath>
  #include <cstdint>
  #include <cstring>
 -#include <emmintrin.h>
@@ -268,7 +269,7 @@ index 47f8765..8fa6635 100644
  
  namespace bf2n {
  // Exact equivalent of byte reads at ((address+i)^endian_xor)&physical_mask.
-@@ -22,10 +22,10 @@ inline void CopyTextureRow(const uint8_t* memory, uint32_t address, uint32_t byt
+@@ -22,10 +23,10 @@ inline void CopyTextureRow(const uint8_t* memory, uint32_t address, uint32_t byt
        --bytes;
        continue;
      }

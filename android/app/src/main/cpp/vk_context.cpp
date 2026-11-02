@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#include <windows.h>
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
 #include "vk_context.h"
 
 #include <SDL3/SDL.h>
@@ -24,6 +28,10 @@ Context& Get() {
 
 bool Context::Init(SDL_Window* window) {
     window_ = window;
+#ifdef _WIN32
+    // the SDK's Windows package has SDL built without Vulkan: the surface comes from the window's HWND
+    std::vector<const char*> ext = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+#else
     if (!SDL_Vulkan_LoadLibrary(nullptr)) {
         REXLOG_ERROR("vulkan: no loader: {}", SDL_GetError());
         return false;
@@ -31,6 +39,7 @@ bool Context::Init(SDL_Window* window) {
     Uint32 n_ext = 0;
     const char* const* sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_ext);
     std::vector<const char*> ext(sdl_ext, sdl_ext + n_ext);
+#endif
 
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "Battlefield 2: Modern Combat";
@@ -40,10 +49,17 @@ bool Context::Init(SDL_Window* window) {
     ici.enabledExtensionCount = uint32_t(ext.size());
     ici.ppEnabledExtensionNames = ext.data();
     VK_CHECK(vkCreateInstance(&ici, nullptr, &instance));
+#ifdef _WIN32
+    VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    sci.hinstance = GetModuleHandleW(nullptr);
+    sci.hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    VK_CHECK(vkCreateWin32SurfaceKHR(instance, &sci, nullptr, &surface));
+#else
     if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface)) {
         REXLOG_ERROR("vulkan: no surface: {}", SDL_GetError());
         return false;
     }
+#endif
 
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(instance, &n, nullptr);

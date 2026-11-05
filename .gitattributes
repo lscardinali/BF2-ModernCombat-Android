@@ -1,2 +1,5 @@
 # git apply needs the patches byte for byte
 *.patch -text
+
+# Windows batch files need CRLF
+*.cmd text eol=crlf

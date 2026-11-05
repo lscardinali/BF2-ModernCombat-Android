@@ -1,0 +1,45 @@
+# On each version tag, publishes the source kit: this repository as a zip, with Build-APK.cmd. Nothing from the game is
+# in it, and nothing here builds the game: players build their own APK from their own disc on their own PC
+# (tools/setup.ps1). It runs on GitHub's machines and needs no secrets.
+#   git tag v0.1.0 && git push origin v0.1.0
+name: Source kit
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  kit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nothing from the game, no binaries, no keys
+        run: |
+          bad=$(git ls-files | grep -iE '\.(xex|iso|xiso|viv|sux|loc|so|apk|aab|dll|exe|jks|keystore|p12|bin|spv)$|^(game|out|third_party|generated|signing)/' || true)
+          big=$(git ls-files -z | xargs -0 du -k | awk '$1 > 1024 {print $2}' | grep -v '^android/gradle/wrapper/gradle-wrapper.jar$' || true)
+          if [ -n "$bad$big" ]; then
+            echo "::error::these must not be published:"; echo "$bad"; echo "$big"; exit 1
+          fi
+
+      - name: Zip
+        run: |
+          name="BF2-ModernCombat-Android-${GITHUB_REF_NAME}-source-kit"
+          git archive --format=zip --prefix="$name/" -o "$name.zip" HEAD
+          echo "KIT=$name.zip" >> "$GITHUB_ENV"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<NOTES
+          **Source kit only:** no game, no XEX, no generated code, no APK. Bring your own Battlefield 2: Modern Combat (USA) Xbox 360 disc image.
+
+          **To build your APK** on a Windows PC: unzip, run \`Build-APK.cmd\` and choose your \`.iso\`. It asks before installing anything it needs (Git, Python, a JDK, the Android SDK, NDK and CMake), recompiles the game from your disc, builds the APK, and installs it on your phone over USB. It needs about 30 GB free, and the first build takes an hour or more. Then open the app on the phone and choose the \`.iso\` again to copy the game files in. Play with a controller.
+
+          The APK you build contains code from your copy of the game: keep it to yourself. See README.md and NOTICE.md.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" "$KIT" --title "BF2-ModernCombat-Android ${GITHUB_REF_NAME} source kit" --notes-file notes.md --generate-notes

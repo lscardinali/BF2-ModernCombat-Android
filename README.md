@@ -13,7 +13,7 @@ A native Android port of **Battlefield 2: Modern Combat** (Xbox 360, 2006). Ther
 
 This repository holds no game code, assets or executables. To build and play you need your own **Xbox 360 USA disc image** of the game. Its `default.xex` has the SHA-256 `a2e791b5…5484`; the build and the app both check it.
 
-Every APK you build contains code recompiled from the game, so **the APK is for you alone: don't share it, upload it or attach it to issues.** For the same reason there are no public releases. See [NOTICE.md](NOTICE.md).
+Every APK you build contains code recompiled from the game, so **the APK is for you alone: don't share it, upload it or attach it to issues.** For the same reason, releases are source kits: you build the APK yourself from your own disc, with `Build-APK.cmd`. See [NOTICE.md](NOTICE.md).
 
 Battlefield 2: Modern Combat belongs to Electronic Arts and DICE. This project is not affiliated with or endorsed by EA, DICE or Microsoft.
 
@@ -35,13 +35,18 @@ Tested on a Redmi phone (Unisoc T7250, Mali-G57, 3 GB, Android 15): menus at 30 
 
 **Phone requirements:** arm64, Android 12 or newer, Vulkan 1.1 or newer, and about 4.5 GB free for the game files.
 
-## Build
+## Build your APK
 
-On Windows, with:
+**The easy way, on a Windows PC:**
 
-- Git and Python 3
-- Android Studio, with the Android SDK, NDK 30.0.16248370 and CMake 4.1.2 from its SDK Manager
-- your disc image, as an `.iso` in the repository folder
+1. Download the latest **source kit** from [Releases](../../releases) and unzip it, or clone this repository.
+2. Run `Build-APK.cmd`, and choose your `.iso` when it asks.
+
+It asks before installing anything it needs: Git, Python, a Java JDK, the Visual C++ runtime, and Google's Android command-line tools with the SDK, NDK and CMake. You'll be asked to accept the Android SDK licenses. It then recompiles the game from your disc and builds a signed APK (`BF2-ModernCombat-Android.apk`, next to `Build-APK.cmd`). If a phone is connected over USB with USB debugging on, it installs the APK there too. It needs about 30 GB free, and the first build takes an hour or more. Run it again after a failure: finished steps are skipped, and `setup-log.txt` has the details.
+
+The first run makes a signing key in `signing/`. Keep that folder, because later builds must use the same key to install over earlier ones.
+
+**By hand,** with Git, Python 3 and Android Studio (with the SDK, NDK 30.0.16248370 and CMake 4.1.2 from its SDK Manager), and your `.iso` in the repository folder:
 
 ```powershell
 . tools/env.ps1
@@ -52,9 +57,9 @@ $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
 ./gradlew assembleRelease   # or assembleDebug, or open android/ in Android Studio
 ```
 
-The APK lands in `android/app/build/outputs/apk/`. A release build is shrunk with R8 and its native libraries are stripped (about 50 MB). It is signed when a keystore is set up (see [Releases](#releases)), and otherwise left unsigned. A debug build keeps the symbols, for stack dumps.
+The APK lands in `android/app/build/outputs/apk/`. A release build is shrunk with R8 and its native libraries are stripped (about 50 MB). It is signed with `signing/keystore.properties` if it exists, and otherwise left unsigned. The `ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` environment variables override that file. A debug build keeps the symbols, for stack dumps.
 
-`game/`, `out/` and `third_party/` are gitignored. Keep it that way.
+`game/`, `out/`, `third_party/` and `signing/` are gitignored. Keep it that way.
 
 ## Installing the game on the phone
 
@@ -71,6 +76,7 @@ The app opens on a home screen. With no game installed, it asks for the disc ima
 
 | Path | What |
 |---|---|
+| `Build-APK.cmd`, `tools/setup.ps1` | the one-click build: installs what is missing, recompiles your disc, builds and installs the APK |
 | `tools/fetch_deps.ps1` | clones the SDK (bd833a2) and the PC port (f2b236b) into `third_party/`, applies `patches/`, downloads the SDK's recompiler |
 | `tools/recompile.ps1` | extracts the disc into `game/` and writes the generated C++ into `out/recomp` |
 | `cmake/bf2mc.cmake` | the SDK, the game code and the PC port's sources, shared by the app, the harness and the Windows build |
@@ -91,38 +97,14 @@ The app opens on a home screen. With no game installed, it asks for the disc ima
 
 ## Releases
 
-Releases are built on your own PC, because the build needs your game files: GitHub's machines can't build the APK, and they mustn't be given the game. `tools/release.ps1` builds the signed APK, tags the commit, pushes the tag, and attaches the APK to a **draft** release, which only people with write access to the repository see. The APK contains the game's code, so don't publish the drafts.
+Releases are **source kits**, like the PC port's: this repository as a zip, with `Build-APK.cmd`, and nothing from the game. Pushing a version tag publishes one:
 
 ```powershell
-tools/release.ps1 -Version 1.0.0
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-The script needs:
-
-- the game recompiled (`tools/recompile.ps1`)
-- a clean `main` that's pushed to GitHub, because the release is built from exactly that commit
-- the GitHub CLI signed in (`winget install GitHub.cli`, then `gh auth login`), or `GITHUB_TOKEN` set to a token that can write to the repository
-- a signing keystore, as below
-
-The version code comes from the version: 1.2.3 becomes 10203, so each release installs over the one before.
-
-**Signing.** Make a keystore once, keep it, and back it up. Losing it means updates can't be installed over existing installs.
-
-```powershell
-mkdir signing
-keytool -genkeypair -keystore signing/release.jks -storetype PKCS12 -alias bf2mc -keyalg RSA -keysize 4096 -validity 10000
-```
-
-(`keytool` is in `C:\Program Files\Android\Android Studio\jbr\bin`.) Then write `signing/keystore.properties`:
-
-```properties
-storeFile=release.jks
-storePassword=...
-keyAlias=bf2mc
-keyPassword=...
-```
-
-`signing/` is gitignored. `./gradlew assembleRelease` signs with it too. The `ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` environment variables override it.
+`.github/workflows/source-kit.yml` runs on GitHub's machines. It fails if any tracked file looks like game data, a binary or a key, zips the repository, and publishes the release. It needs no secrets. Players then build their own APK from their own disc. An APK is never published, because it contains the game's code.
 
 ## Debugging
 

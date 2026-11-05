@@ -4,7 +4,7 @@
 
 This repository is source code and build scripts only. It contains no game assets, no game executable (`default.xex`), no code generated from the game, and no SDK binaries. `tools/fetch_deps.ps1` downloads the dependencies below, and `tools/recompile.ps1` generates the game code on your own PC from your own disc.
 
-An APK built from it is different. The game's PowerPC code is recompiled into C++ and compiled into `libmain.so`, so every APK contains code derived from Electronic Arts' game. **Do not share APKs, the generated code or the game files.** That holds for GitHub releases, issues and pull requests too. `tools/release.ps1` only makes draft releases, which are visible to people with write access to the repository (see the README).
+An APK built from it is different. The game's PowerPC code is recompiled into C++ and compiled into `libmain.so`, so every APK contains code derived from Electronic Arts' game. **Do not share APKs, the generated code or the game files.** That holds for GitHub releases, issues and pull requests too. This project's releases are source kits with nothing from the game in them: everyone builds their own APK from their own disc (`Build-APK.cmd`).
 
 Battlefield 2: Modern Combat, its code, trademarks and assets belong to Electronic Arts and DICE. This project is not affiliated with or endorsed by Electronic Arts, DICE or Microsoft. Xbox and Xbox 360 are trademarks of Microsoft.
 

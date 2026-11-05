@@ -12,3 +12,7 @@ __pycache__/
 
 # release keystore and its passwords: back them up, never commit them
 /signing/
+
+# what tools/setup.ps1 leaves next to the sources
+/setup-log.txt
+/*.apk

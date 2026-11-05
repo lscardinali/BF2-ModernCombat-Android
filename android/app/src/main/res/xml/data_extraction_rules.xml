@@ -1,19 +1,18 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
--->
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What Android's backup and device-to-device transfer take: the game's saves and the settings in files/user, about
+     30 KB. Not the game files (files/game, about 4 GB, imported from your own disc again on a new phone), nor what the
+     app rebuilds on its own: compiled shaders, the cache and logs. -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <include domain="file" path="user/" />
+        <exclude domain="file" path="user/shaders/" />
+        <exclude domain="file" path="user/cache/" />
+        <exclude domain="file" path="user/logs/" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <include domain="file" path="user/" />
+        <exclude domain="file" path="user/shaders/" />
+        <exclude domain="file" path="user/cache/" />
+        <exclude domain="file" path="user/logs/" />
     </device-transfer>
-    -->
 </data-extraction-rules>

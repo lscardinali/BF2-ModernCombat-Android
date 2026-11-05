@@ -1,4 +1,5 @@
-// pc_settings.h without its screen: the values the port's hooks read, at their defaults. The Android settings come later.
+// pc_settings.h without the PC settings screen: the values the port's hooks read. The Android app has its own settings
+// (GameSettings.kt, the renderer's device tiers), and the game's own menu keeps volume and controls.
 #include <SDL3/SDL.h>
 
 #include <rex/runtime.h>

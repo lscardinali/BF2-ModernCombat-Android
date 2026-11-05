@@ -9,3 +9,6 @@
 /out/
 /generated/
 __pycache__/
+
+# release keystore and its passwords: back them up, never commit them
+/signing/

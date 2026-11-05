@@ -1,0 +1,106 @@
+# Builds the signed APK and attaches it to a DRAFT release, which only people with write access to the repository see.
+#
+# It runs on a self-hosted runner on your own PC, never on GitHub's machines: the APK contains code recompiled from the
+# game, so building it needs your disc, and the APK must not be published (NOTICE.md). The runner needs the label
+# "bf2mc", the tools in the README's "Build" section, and the environment variable BF2_GAME_DIR: the folder with your
+# extracted game files (the one with default.xex, as tools/recompile.ps1 makes in game/).
+#
+# Secrets (Settings > Secrets and variables > Actions): ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
+# ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. signing/github-secrets.txt has them, once the README's "Signing" step is done.
+#
+# Start it by pushing a tag (git tag v1.0.0; git push origin v1.0.0) or from the Actions tab.
+name: Release APK
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version name, e.g. 1.0.0'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  apk:
+    # only in the owner's repository: forks have no runner and no secrets
+    if: github.repository_owner == 'lscardinali'
+    runs-on: [self-hosted, Windows, bf2mc]
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VERSION_NAME: ${{ github.event.inputs.version || github.ref_name }}
+      VERSION_CODE: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # keep third_party/ and out/ from the last run: the SDK and the generated game code take long to remake
+          clean: false
+
+      - name: Game files
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:BF2_GAME_DIR -or -not (Test-Path "$env:BF2_GAME_DIR\default.xex")) {
+            throw "Set BF2_GAME_DIR on the runner to the folder with your extracted game (default.xex)"
+          }
+          if (-not (Test-Path game)) { cmd /c mklink /J game "$env:BF2_GAME_DIR" }
+
+      - name: Dependencies
+        run: |
+          . tools/env.ps1
+          tools/fetch_deps.ps1
+
+      - name: Recompile the game
+        run: |
+          . tools/env.ps1
+          tools/recompile.ps1
+
+      - name: Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'release.jks'
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:KEYSTORE_BASE64))
+          "ANDROID_KEYSTORE_PATH=$path" >> $env:GITHUB_ENV
+
+      - name: Build
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          . tools/env.ps1
+          $env:VERSION_NAME = $env:VERSION_NAME -replace '^v', ''
+          if (-not $env:JAVA_HOME) { $env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr' }
+          Push-Location android
+          ./gradlew.bat assembleRelease --console=plain
+          if ($LASTEXITCODE) { throw "gradle failed" }
+          Pop-Location
+          $apk = "BF2-ModernCombat-Android-$env:VERSION_NAME.apk"
+          Copy-Item android/app/build/outputs/apk/release/app-release.apk $apk
+          "APK=$apk" >> $env:GITHUB_ENV
+
+      - name: Draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref_name }}
+          name: ${{ env.VERSION_NAME }}
+          files: ${{ env.APK }}
+          body: |
+            Built from ${{ github.sha }}.
+            Private build: it contains code recompiled from the game. Do not publish this release or share the APK (NOTICE.md).
+
+      - name: Clean up
+        if: always()
+        run: |
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'release.jks') -ErrorAction SilentlyContinue
+          Remove-Item BF2-ModernCombat-Android-*.apk -ErrorAction SilentlyContinue

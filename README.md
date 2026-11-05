@@ -91,7 +91,20 @@ The app opens on a home screen. With no game installed, it asks for the disc ima
 
 ## Releases
 
-`.github/workflows/release.yml` builds the signed APK and attaches it to a **draft** release, visible only to people with write access to the repository. The APK contains the game's code, so the workflow runs on a self-hosted runner on your own PC, where your game files are, never on GitHub's machines. Don't publish the drafts.
+Releases are built on your own PC, because the build needs your game files: GitHub's machines can't build the APK, and they mustn't be given the game. `tools/release.ps1` builds the signed APK, tags the commit, pushes the tag, and attaches the APK to a **draft** release, which only people with write access to the repository see. The APK contains the game's code, so don't publish the drafts.
+
+```powershell
+tools/release.ps1 -Version 1.0.0
+```
+
+The script needs:
+
+- the game recompiled (`tools/recompile.ps1`)
+- a clean `main` that's pushed to GitHub, because the release is built from exactly that commit
+- the GitHub CLI signed in (`winget install GitHub.cli`, then `gh auth login`), or `GITHUB_TOKEN` set to a token that can write to the repository
+- a signing keystore, as below
+
+The version code comes from the version: 1.2.3 becomes 10203, so each release installs over the one before.
 
 **Signing.** Make a keystore once, keep it, and back it up. Losing it means updates can't be installed over existing installs.
 
@@ -109,16 +122,7 @@ keyAlias=bf2mc
 keyPassword=...
 ```
 
-`signing/` is gitignored. Local release builds sign with it. For the workflow, add four repository secrets (Settings → Secrets and variables → Actions): `ANDROID_KEYSTORE_BASE64` (the keystore, base64: `[Convert]::ToBase64String([IO.File]::ReadAllBytes('signing/release.jks'))`), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`.
-
-**Runner.** On the PC that builds, once the game is recompiled (`game/` exists):
-
-1. On GitHub, open the repository's Settings → Actions → Runners → New self-hosted runner, and copy the token from the `config.cmd` line. It lasts an hour.
-2. Run `tools/setup_runner.ps1 -Token <token>`. It downloads GitHub's runner into `D:\actions-runner-bf2mc`, checks its SHA-256 against the one GitHub publishes, and registers it with the label `bf2mc`. It also sets `BF2_GAME_DIR` (the folder with `default.xex`, `game/` by default) and `JAVA_HOME` for its jobs.
-3. Start `D:\actions-runner-bf2mc\run.cmd` whenever you want releases built.
-4. A public repository lets anyone open pull requests, and a pull request can bring its own workflow. Set **Settings → Actions → General → Fork pull request workflows → Require approval for all external contributors**, so nothing runs on your PC without your approval. The release workflow itself only runs for tags you push and runs you start yourself.
-
-Push a tag to build: `git tag v1.0.0 && git push origin v1.0.0`. You can also run it from the Actions tab with a version number. The first run fetches the SDK and recompiles the game; later runs reuse both.
+`signing/` is gitignored. `./gradlew assembleRelease` signs with it too. The `ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` environment variables override it.
 
 ## Debugging
 

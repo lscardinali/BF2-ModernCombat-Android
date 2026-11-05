@@ -111,11 +111,11 @@ keyPassword=...
 
 `signing/` is gitignored. Local release builds sign with it. For the workflow, add four repository secrets (Settings → Secrets and variables → Actions): `ANDROID_KEYSTORE_BASE64` (the keystore, base64: `[Convert]::ToBase64String([IO.File]::ReadAllBytes('signing/release.jks'))`), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`.
 
-**Runner.**
+**Runner.** On the PC that builds, once the game is recompiled (`game/` exists):
 
-1. Add a self-hosted Windows runner to the repository (Settings → Actions → Runners → New self-hosted runner) on the PC that builds. Give it the label `bf2mc`.
-2. Give the runner the environment variable `BF2_GAME_DIR`: your extracted game folder, the one with `default.xex`. `tools/recompile.ps1` makes one in `game/`. You can set it in the runner's `.env` file.
-3. Install the build tools listed above on that PC.
+1. On GitHub, open the repository's Settings → Actions → Runners → New self-hosted runner, and copy the token from the `config.cmd` line. It lasts an hour.
+2. Run `tools/setup_runner.ps1 -Token <token>`. It downloads GitHub's runner into `D:\actions-runner-bf2mc`, checks its SHA-256 against the one GitHub publishes, and registers it with the label `bf2mc`. It also sets `BF2_GAME_DIR` (the folder with `default.xex`, `game/` by default) and `JAVA_HOME` for its jobs.
+3. Start `D:\actions-runner-bf2mc\run.cmd` whenever you want releases built.
 4. A public repository lets anyone open pull requests, and a pull request can bring its own workflow. Set **Settings → Actions → General → Fork pull request workflows → Require approval for all external contributors**, so nothing runs on your PC without your approval. The release workflow itself only runs for tags you push and runs you start yourself.
 
 Push a tag to build: `git tag v1.0.0 && git push origin v1.0.0`. You can also run it from the Actions tab with a version number. The first run fetches the SDK and recompiles the game; later runs reuse both.

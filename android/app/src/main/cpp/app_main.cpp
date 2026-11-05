@@ -144,6 +144,7 @@ int main(int argc, char** argv) {
   fs::create_directories(user, ec);
 
   if (fs::exists(user / "audio_log", ec)) SetEnv("BF2_AUDIO_LOG", "1");
+  if (fs::exists(user / "no_perf_hint", ec)) SetEnv("BF2_NO_PERF_HINT", "1");
   if (fs::exists(user / "pcm_dump", ec)) SetEnv("BF2_PCM_DUMP", (user / "mix.pcm").string());
   if (std::ifstream f(user / "draw_stacks"); f) {  // a number of seconds: maps two frames after that long
     std::string seconds;

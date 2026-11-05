@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Game Mode (Android 12+): the game leaves it to the system to pick performance or battery modes, and keeps its own
+     resolution and frame rate, which the renderer sets from the phone's memory (README, Device tiers) -->
+<game-mode-config xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsBatteryGameMode="true"
+    android:supportsPerformanceGameMode="true"
+    android:allowGameDownscaling="false"
+    android:allowGameFpsOverride="false" />

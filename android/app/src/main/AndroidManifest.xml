@@ -17,6 +17,7 @@
 
     <application
         android:allowBackup="false"
+        android:appCategory="game"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:hardwareAccelerated="true"
@@ -52,6 +53,9 @@
             android:launchMode="singleTask"
             android:preferMinimalPostProcessing="true"
             android:screenOrientation="sensorLandscape" />
+        <meta-data
+            android:name="android.game_mode_config"
+            android:resource="@xml/game_mode_config" />
         <service
             android:name=".KeepAliveService"
             android:exported="false"

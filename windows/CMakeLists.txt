@@ -19,7 +19,7 @@ set(SKIP_GLSLANG_INSTALL ON CACHE BOOL "" FORCE)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)  # glslang asks for less than CMake 4 still accepts
 add_subdirectory(${SDK_THIRDPARTY}/glslang ${CMAKE_BINARY_DIR}/glslang EXCLUDE_FROM_ALL)
 
-add_executable(bf2mc ${APP}/app_main.cpp ${APP}/vk_context.cpp ${APP}/vk_shaders.cpp
+add_executable(bf2mc ${APP}/app_main.cpp ${APP}/perf_hint.cpp ${APP}/vk_context.cpp ${APP}/vk_shaders.cpp
     ${APP}/vk_renderer.cpp ${APP}/vk_loader13.cpp
     ${BF2_PORT}/native_gpu/textures.cpp ${BF2_PORT}/native_gpu/xenos_hlsl.cpp
     ${SDK_THIRDPARTY}/glslang/StandAlone/ResourceLimits.cpp)

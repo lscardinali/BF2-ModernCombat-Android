@@ -43,6 +43,8 @@
 #include "vk_shaders.h"
 
 namespace bf2n {
+void PerfHintThread();  // perf_hint.cpp
+void PerfHintFrame();
 namespace {
 
 using vk::Get;
@@ -856,6 +858,7 @@ void Renderer::WaitAllPresented() {
 }
 
 void Renderer::PresentThread() {
+  PerfHintThread();
   for (;;) {
     PresentJob job;
     {
@@ -2777,6 +2780,7 @@ void Renderer::Swap(uint32_t device, uint32_t front_texture) {
     job.linear = r->linear;
   }
   const bool capturing = Capturing();
+  PerfHintFrame();
   QueuePresent(job);
   Get().Advance();
   if (capturing) {

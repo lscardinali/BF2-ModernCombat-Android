@@ -84,6 +84,10 @@ Results land in `out/runs/<Name>`. The scripted pad re-reads `out/windows/user/s
 
 On phones with 4 GB of memory or less the renderer draws at half resolution, caps mipmapped textures at 256, evicts unused textures over 192 MB, uses plain multiplies and cheaper filtering, and bloom is off. Above 4 GB: full resolution, textures up to 1024, a 768 MB budget, everything on. `user/scale` and `user/max_texture` in the app's files override the first two. The target is Snapdragon 865 and newer; only the Mali-G57 phone has been tried.
 
+## Performance hints
+
+From Android 13, `perf_hint.cpp` reports each frame to Android's performance hint API (ADPF). It sends the larger of the game update's CPU time (`sub_82298D20`) and the render thread's, against the game's 33.3 ms. The scheduler then raises clocks and moves the threads to big cores before frames run late, and lowers them when there's room. The API links weakly and every call is behind `__builtin_available`, so the app still runs from Android 12, where the hint is skipped. When the game starts a new render thread for a mission, the session moves to it. On the Mali phone the mission is GPU-bound, and its frame rate is the same either way (11.5 fps); the hint is for CPU-bound phones. `user/no_perf_hint` turns it off for comparisons. The manifest also declares the app a game (`appCategory`, `game_mode_config.xml`) for Game Mode and vendors' game profiles.
+
 ## Measuring
 
 Files in the app's `files/user` folder switch these on: `gpu_times` (GPU time of each pass, every 150 frames), `capture` (a frame number: its draws logged, its targets dumped, `tools/capture_app.ps1`), `dump_stacks`, `draw_stacks` (a number of seconds: the guest call stack of every draw of two frames after that long), `audio_log`, `pcm_dump`, `force_vulkan_11`.

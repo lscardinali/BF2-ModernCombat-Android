@@ -49,17 +49,7 @@ bool Context::Init(SDL_Window* window) {
     ici.enabledExtensionCount = uint32_t(ext.size());
     ici.ppEnabledExtensionNames = ext.data();
     VK_CHECK(vkCreateInstance(&ici, nullptr, &instance));
-#ifdef _WIN32
-    VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
-    sci.hinstance = GetModuleHandleW(nullptr);
-    sci.hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
-    VK_CHECK(vkCreateWin32SurfaceKHR(instance, &sci, nullptr, &surface));
-#else
-    if (!SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface)) {
-        REXLOG_ERROR("vulkan: no surface: {}", SDL_GetError());
-        return false;
-    }
-#endif
+    if (!CreateSurface()) return false;
 
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(instance, &n, nullptr);
@@ -198,6 +188,61 @@ bool Context::Init(SDL_Window* window) {
     return CreateSwapchain();
 }
 
+bool Context::CreateSurface() {
+#ifdef _WIN32
+    VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+    sci.hinstance = GetModuleHandleW(nullptr);
+    sci.hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(window_), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    return vkCreateWin32SurfaceKHR(instance, &sci, nullptr, &surface) == VK_SUCCESS;
+#else
+    if (!SDL_Vulkan_CreateSurface(window_, instance, nullptr, &surface)) {
+        REXLOG_ERROR("vulkan: no surface: {}", SDL_GetError());
+        surface = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+#endif
+}
+
+void Context::Pause() {
+    std::lock_guard lock(pause_mutex_);
+    paused_ = true;
+}
+
+void Context::Resume() {
+    {
+        std::lock_guard lock(pause_mutex_);
+        paused_ = false;
+        surface_stale_ = true;  // Android gives the activity a new window when it comes back
+    }
+    pause_cv_.notify_all();
+}
+
+// Present thread. Holds the frame while the app is in the background: the game thread then waits for it in
+// BeginFrame, so the game stops instead of running on behind the home screen.
+bool Context::ReadyToPresent() {
+    {
+        std::unique_lock lock(pause_mutex_);
+        if (paused_) {
+            REXLOG_INFO("vulkan: paused in the background");
+            pause_cv_.wait(lock, [&] { return !paused_; });
+            REXLOG_INFO("vulkan: resumed");
+        }
+    }
+    if (!surface_stale_) return true;
+    // a new surface and swapchain for the window SDL has now. Until the activity has one, skip the present.
+    vkDeviceWaitIdle(device);
+    DestroySwapchain();
+    if (surface) vkDestroySurfaceKHR(instance, surface, nullptr);
+    surface = VK_NULL_HANDLE;
+    if (!CreateSurface() || !CreateSwapchain()) {
+        SDL_Delay(20);
+        return false;
+    }
+    surface_stale_ = false;
+    return true;
+}
+
 bool Context::CreateSwapchain() {
     VkSurfaceCapabilitiesKHR caps;
     VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpu, surface, &caps));
@@ -286,10 +331,15 @@ VkCommandBuffer Context::Begin() {
 bool Context::Acquire(uint32_t slot, uint32_t& image) {
     Frame& f = frames[slot];
     acquired_ = false;
+    if (!ReadyToPresent() || !swapchain) return false;
     VkResult r = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, f.acquired, VK_NULL_HANDLE, &image);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         vkDeviceWaitIdle(device);
         CreateSwapchain();
+        return false;
+    }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) {  // the window went away before the pause reached us
+        surface_stale_ = true;
         return false;
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) VK_CHECK(r);
@@ -329,6 +379,8 @@ void Context::Submit(uint32_t slot, bool present, uint32_t image) {
         if (r == VK_ERROR_OUT_OF_DATE_KHR) {
             vkDeviceWaitIdle(device);
             CreateSwapchain();
+        } else if (r == VK_ERROR_SURFACE_LOST_KHR) {
+            surface_stale_ = true;
         } else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
             VK_CHECK(r);
         }

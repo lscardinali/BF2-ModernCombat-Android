@@ -23,12 +23,6 @@ class SettingsActivity : ComponentActivity() {
             settings.fillScreen = checked
             settings.save()
         }
-        val split = findViewById<Switch>(R.id.settings_split)
-        split.isChecked = settings.splitScreen
-        split.setOnCheckedChangeListener { _, checked ->
-            settings.splitScreen = checked
-            settings.save()
-        }
         findViewById<Button>(R.id.settings_back).setOnClickListener { finish() }
         fill.requestFocus()
     }

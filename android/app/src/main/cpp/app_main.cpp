@@ -75,72 +75,8 @@ fs::path FindGameBase(fs::path& user_base) {
   return {};
 }
 
-// Test aid: the scripted pad drives only one split screen player (user/split_script_player: 0 or 1).
-class OnePlayerDriver final : public rex::input::InputDriver {
- public:
-  OnePlayerDriver(std::unique_ptr<rex::input::InputDriver> inner, int player)
-      : rex::input::InputDriver(nullptr, 0), inner_(std::move(inner)), player_(player) {}
-  X_STATUS Setup() override { return inner_->Setup(); }
-  void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override { inner_->EnumerateDevices(out); }
-  X_RESULT GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) override {
-    const X_RESULT r = inner_->GetDeviceState(id, out);
-    const int side = bf2n::SplitSide();
-    if (r == X_ERROR_SUCCESS && side >= 0 && side != player_) std::memset(&out->gamepad, 0, sizeof(out->gamepad));
-    return r;
-  }
-  X_RESULT GetDeviceCapabilities(rex::input::DeviceId id, uint32_t flags, rex::input::X_INPUT_CAPABILITIES* out) override {
-    return inner_->GetDeviceCapabilities(id, flags, out);
-  }
-  X_RESULT SetDeviceVibration(rex::input::DeviceId id, rex::input::X_INPUT_VIBRATION* v) override {
-    return inner_->SetDeviceVibration(id, v);
-  }
-  X_RESULT GetDeviceKeystroke(rex::input::DeviceId id, uint32_t flags, rex::input::X_INPUT_KEYSTROKE* out) override {
-    return inner_->GetDeviceKeystroke(id, flags, out);
-  }
-
- private:
-  std::unique_ptr<rex::input::InputDriver> inner_;
-  int player_;
-};
-
-// Test aid: user/script2.txt is the guest's user 1, standing in for a second pad.
-class SecondUserDriver final : public rex::input::InputDriver {
- public:
-  explicit SecondUserDriver(std::string path) : rex::input::InputDriver(nullptr, 0), inner_(std::move(path)) {
-    std::vector<rex::input::DeviceInfo> devices;
-    inner_.EnumerateDevices(devices);
-    inner_id_ = devices[0].id;
-  }
-  X_STATUS Setup() override { return inner_.Setup(); }
-  void EnumerateDevices(std::vector<rex::input::DeviceInfo>& out) override {
-    rex::input::DeviceInfo info;
-    info.id = kId;
-    info.name = "Script pad 2";
-    info.guid = "script2";
-    info.synthetic = false;
-    out.push_back(info);
-  }
-  X_RESULT GetDeviceState(rex::input::DeviceId id, rex::input::X_INPUT_STATE* out) override {
-    return id == kId ? inner_.GetDeviceState(inner_id_, out) : X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-  X_RESULT GetDeviceCapabilities(rex::input::DeviceId id, uint32_t flags, rex::input::X_INPUT_CAPABILITIES* out) override {
-    return id == kId ? inner_.GetDeviceCapabilities(inner_id_, flags, out) : X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-  X_RESULT SetDeviceVibration(rex::input::DeviceId id, rex::input::X_INPUT_VIBRATION* v) override {
-    return id == kId ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-  X_RESULT GetDeviceKeystroke(rex::input::DeviceId id, uint32_t, rex::input::X_INPUT_KEYSTROKE*) override {
-    return id == kId ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
-  }
-
- private:
-  static constexpr rex::input::DeviceId kId = static_cast<rex::input::DeviceId>(0x5C21FA);
-  ScriptInputDriver inner_;
-  rex::input::DeviceId inner_id_{};
-};
-
 void PublishPad() {
-  SdlPadDriver::State s, player[2];
+  SdlPadDriver::State s;
   int count = 0;
   static SDL_Gamepad* open[8] = {};
   if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
@@ -158,17 +94,8 @@ void PublishPad() {
                   {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, 0x0100}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 0x0200},
                   {SDL_GAMEPAD_BUTTON_SOUTH, 0x1000},       {SDL_GAMEPAD_BUTTON_EAST, 0x2000},
                   {SDL_GAMEPAD_BUTTON_WEST, 0x4000},        {SDL_GAMEPAD_BUTTON_NORTH, 0x8000}};
-      SdlPadDriver::State one;
       for (const auto& m : kMap)
-        if (SDL_GetGamepadButton(g, m.b)) one.buttons |= m.bit;
-      one.lt = uint8_t(std::max(0, int(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))) >> 7);
-      one.rt = uint8_t(std::max(0, int(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) >> 7);
-      one.lx = Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX));
-      one.ly = Stick(int16_t(-int(Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY)))));
-      one.rx = Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX));
-      one.ry = Stick(int16_t(-int(Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY)))));
-      if (i < 2) player[i] = one;
-      s.buttons |= one.buttons;
+        if (SDL_GetGamepadButton(g, m.b)) s.buttons |= m.bit;
       s.lt = std::max<uint8_t>(s.lt, uint8_t(std::max(0, int(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))) >> 7));
       s.rt = std::max<uint8_t>(s.rt, uint8_t(std::max(0, int(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) >> 7));
       if (!s.lx) s.lx = Stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX));
@@ -189,11 +116,7 @@ void PublishPad() {
   }
   if (fingers == 1) s.buttons |= 0x1000;
   if (fingers >= 2) s.buttons |= 0x0010;
-  if (fingers == 1) player[0].buttons |= 0x1000;
-  if (fingers >= 2) player[0].buttons |= 0x0010;
-  SdlPadDriver::Publish(0, s);
-  SdlPadDriver::Publish(1, player[0]);
-  SdlPadDriver::Publish(2, player[1]);
+  SdlPadDriver::Publish(s);
 }
 
 }  // namespace
@@ -222,10 +145,6 @@ int main(int argc, char** argv) {
 
   if (fs::exists(user / "audio_log", ec)) SetEnv("BF2_AUDIO_LOG", "1");
   if (fs::exists(user / "pcm_dump", ec)) SetEnv("BF2_PCM_DUMP", (user / "mix.pcm").string());
-  if (std::ifstream f(user / "settings.toml"); f) {  // written by GameSettings.kt
-    for (std::string line; std::getline(f, line);)
-      if (line == "split_screen = true") SetEnv("BF2_SPLIT", "1");
-  }
   if (std::ifstream f(user / "draw_stacks"); f) {  // a number of seconds: maps two frames after that long
     std::string seconds;
     f >> seconds;
@@ -245,8 +164,7 @@ int main(int argc, char** argv) {
   SDL_Window* window = SDL_CreateWindow("Battlefield 2: Modern Combat", 0, 0, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_VULKAN);
 #else
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-  const bool split = std::getenv("BF2_SPLIT") != nullptr;
-  SDL_Window* window = SDL_CreateWindow("Battlefield 2: Modern Combat", split ? 1920 : 1280, split ? 540 : 720, 0);
+  SDL_Window* window = SDL_CreateWindow("Battlefield 2: Modern Combat", 1280, 720, 0);
 #endif
   vk::Get().force_vulkan_11 = fs::exists(user / "force_vulkan_11", ec);
   if (!window || !vk::Get().Init(window)) {
@@ -263,24 +181,14 @@ int main(int argc, char** argv) {
   };
   // user/script.txt: a scripted pad next to the real one, for tools/run_app.ps1 (script_input.h)
   std::string script = fs::exists(user / "script.txt", ec) ? (user / "script.txt").string() : "";
-  int script_player = -1;
-  if (std::ifstream f(user / "split_script_player"); f) f >> script_player;
-  std::string script2 = fs::exists(user / "script2.txt", ec) ? (user / "script2.txt").string() : "";
-  config.input_factory = [script, script2, script_player](bool) -> std::unique_ptr<rex::system::IInputSystem> {
+  config.input_factory = [script](bool) -> std::unique_ptr<rex::system::IInputSystem> {
     auto input = std::make_unique<rex::input::InputSystem>(nullptr);
     input->SetDeviceAssignment(std::make_unique<rex::input::SlotAssignment>());  // no pads without one
-    const bool two_players = std::getenv("BF2_SPLIT2") != nullptr;
-    input->AddDriver(std::make_unique<SdlPadDriver>(two_players, two_players && script2.empty()));
-    if (!script2.empty()) {
-      auto driver = std::make_unique<SecondUserDriver>(script2);
-      driver->Setup();
-      input->AddDriver(std::move(driver));
-    }
+    input->AddDriver(std::make_unique<SdlPadDriver>());
     if (!script.empty()) {
       auto driver = std::make_unique<ScriptInputDriver>(script);
       driver->Setup();
-      if (script_player >= 0) input->AddDriver(std::make_unique<OnePlayerDriver>(std::move(driver), script_player));
-      else input->AddDriver(std::move(driver));
+      input->AddDriver(std::move(driver));
     }
     return input;
   };
@@ -321,6 +229,27 @@ int main(int argc, char** argv) {
 #ifndef _WIN32  // on Windows, tools/run_windows.ps1 has the debugger dump them
   if (fs::exists(user / "dump_stacks", ec)) ThreadDumpAfter((user / "stacks.txt").c_str(), 30, 4);
 #endif
+
+  // Android: the activity's window goes when the app leaves the screen, and SDL then blocks this thread in
+  // SDL_PumpEvents until it is back. The watch runs as SDL queues the event, before it blocks: the present thread holds
+  // the next frame, which stops the game thread, and makes a new surface on the way back. The audio mixer and the vblank
+  // interrupt stop too, or the game's other threads would keep a core busy behind the home screen.
+  SDL_AddEventWatch(
+      [](void*, SDL_Event* e) -> bool {
+        if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) {
+          SdlPadDriver::Publish({});  // nothing held down while away
+          bf2audio::SetPaused(true);
+          bf2n::SetVblankPaused(true);
+          vk::Get().Pause();
+          rex::FlushLogging();
+        } else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) {
+          vk::Get().Resume();
+          bf2n::SetVblankPaused(false);
+          bf2audio::SetPaused(false);
+        }
+        return true;
+      },
+      nullptr);
 
   for (uint64_t tick = 0;; ++tick) {
     SDL_PumpEvents();

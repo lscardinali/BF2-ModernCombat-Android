@@ -23,7 +23,9 @@
     <!-- SettingsActivity -->
     <string name="settings_fill">Fill the screen</string>
     <string name="settings_fill_detail">The game is drawn at 16:9. On a wider screen this stretches the picture to the edges instead of leaving black bars. Applies the next time the game starts.</string>
-    <string name="settings_split">Split screen (experimental)</string>
-    <string name="settings_split_detail">In the campaign, player 2 takes over a teammate with the second controller. Each player gets half the frame rate.</string>
     <string name="settings_back">Back</string>
+
+    <!-- KeepAliveService -->
+    <string name="keep_alive_channel">Paused game</string>
+    <string name="keep_alive_text">Paused. Tap to go back to the game.</string>
 </resources>

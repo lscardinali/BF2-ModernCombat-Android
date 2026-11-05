@@ -1,3 +1,0 @@
-# a second pad for the Windows test build (-Script2): holds forward, then fires
-80 LY=1 25000
-106 RT 3000

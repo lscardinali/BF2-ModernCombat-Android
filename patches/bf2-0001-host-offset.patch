@@ -20,11 +20,15 @@ index ab799dc..a2b477b 100644
    uint32_t v;
    std::memcpy(&v, Host(base, a), 4);
 diff --git a/project/src/native_audio/audio_system.cpp b/project/src/native_audio/audio_system.cpp
-index b02ef21..0f99b30 100644
+index b02ef21..44806a8 100644
 --- a/project/src/native_audio/audio_system.cpp
 +++ b/project/src/native_audio/audio_system.cpp
-@@ -29,6 +29,10 @@ std::atomic<bool> g_output_stalled{false};
+@@ -27,8 +27,14 @@ namespace {
+ // The output device stopped consuming (NativeAudioSystem::WorkerMain): drop the output.
+ std::atomic<bool> g_output_stalled{false};
  
++std::atomic<bool> g_paused{false};
++
  NativeAudioSystem* g_system = nullptr;
  
 +// BF2_AUDIO_LOG: bytes the device asked for that the stream did not have, which it plays as silence.
@@ -34,7 +38,7 @@ index b02ef21..0f99b30 100644
  // Frames kept queued on the host stream before the guest is asked for more (~32 ms).
  constexpr uint32_t kTargetQueuedFrames = 6;
  
-@@ -75,7 +79,13 @@ bool NativeAudioSystem::OpenDevice() {
+@@ -75,7 +81,13 @@ bool NativeAudioSystem::OpenDevice() {
      return false;
    }
    sdl_audio_ = true;
@@ -48,7 +52,7 @@ index b02ef21..0f99b30 100644
    if (!device_) {
      REXLOG_ERROR("[native-audio] unable to open the playback device: {}", SDL_GetError());
      return false;
-@@ -84,8 +94,8 @@ bool NativeAudioSystem::OpenDevice() {
+@@ -84,8 +96,8 @@ bool NativeAudioSystem::OpenDevice() {
    int frames = 0;
    if (SDL_GetAudioDeviceFormat(device_, &spec, &frames)) device_channels_ = spec.channels >= 6 ? 6 : 2;
    const char* name = SDL_GetAudioDeviceName(device_);
@@ -59,7 +63,7 @@ index b02ef21..0f99b30 100644
    return true;
  }
  
-@@ -123,7 +133,13 @@ X_STATUS NativeAudioSystem::RegisterClient(uint32_t callback, uint32_t callback_
+@@ -123,7 +135,13 @@ X_STATUS NativeAudioSystem::RegisterClient(uint32_t callback, uint32_t callback_
      if (c.stream) {
        SDL_SetAudioStreamGetCallback(
            c.stream,
@@ -74,7 +78,7 @@ index b02ef21..0f99b30 100644
            this);
      }
    }
-@@ -170,6 +186,13 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
+@@ -170,6 +188,13 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
        out[i * 2 + 1] = std::clamp((ch(1, i) + mid + ch(5, i) * kSide) * kScale, -1.0f, 1.0f);
      }
    }
@@ -88,7 +92,16 @@ index b02ef21..0f99b30 100644
    // PC settings volume (0 while the settings menu holds the game).
    SDL_SetAudioStreamGain(stream, pcs::Volume());
    if (!g_output_stalled.load(std::memory_order_relaxed))
-@@ -189,6 +212,7 @@ void NativeAudioSystem::WorkerMain() {
+@@ -182,6 +207,8 @@ void NativeAudioSystem::SubmitFrame(uint32_t index, uint32_t samples) {
+   }
+ }
+ 
++void SetPaused(bool paused) { g_paused = paused; }
++
+ void NativeAudioSystem::WorkerMain() {
+   auto* thread = rex::system::XThread::GetCurrentThread();
+   // BF2_AUDIO_LOG=1: per-second render driver and XMA counters.
+@@ -189,6 +216,7 @@ void NativeAudioSystem::WorkerMain() {
    bool log = log_env && *log_env && *log_env != '0';
    auto log_start = std::chrono::steady_clock::now();
    uint32_t callbacks = 0;
@@ -96,7 +109,7 @@ index b02ef21..0f99b30 100644
    // An output device that stops consuming (a TV or receiver switched off) keeps the stream full,
    // and the guest would wait on its mixer callbacks forever: after 200 ms without progress the
    // worker paces by the clock, as without a device, and drops the output until it plays again.
-@@ -203,12 +227,14 @@ void NativeAudioSystem::WorkerMain() {
+@@ -203,14 +231,21 @@ void NativeAudioSystem::WorkerMain() {
    while (running_) {
      if (log && std::chrono::steady_clock::now() - log_start >= std::chrono::seconds(1)) {
        auto x = XmaEngine::Get().TakeStats();
@@ -114,8 +127,15 @@ index b02ef21..0f99b30 100644
 +      callback_ms = callback_max_ms = 0;
        log_start = std::chrono::steady_clock::now();
      }
++    if (g_paused.load(std::memory_order_relaxed)) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(50));
++      last_progress = clock_next = std::chrono::steady_clock::now();  // the way back is not a stall
++      continue;
++    }
      bool stalled = false;
-@@ -250,8 +276,14 @@ void NativeAudioSystem::WorkerMain() {
+     {
+       std::lock_guard guard(lock_);
+@@ -250,8 +285,14 @@ void NativeAudioSystem::WorkerMain() {
      }
      for (uint32_t i = 0; i < count && running_; i++) {
        uint64_t args[] = {due[i][1]};
@@ -130,7 +150,7 @@ index b02ef21..0f99b30 100644
      }
      if (!device_ || stalled) {
        // One 256-sample frame per 5.333 ms, on a fixed schedule (a plain sleep after the
-@@ -261,6 +293,13 @@ void NativeAudioSystem::WorkerMain() {
+@@ -261,6 +302,13 @@ void NativeAudioSystem::WorkerMain() {
        clock_next += std::chrono::nanoseconds(5333333);
        std::this_thread::sleep_until(clock_next);
      }
@@ -144,8 +164,23 @@ index b02ef21..0f99b30 100644
    }
  }
  
+diff --git a/project/src/native_audio/audio_system.h b/project/src/native_audio/audio_system.h
+index a34b02a..e854c82 100644
+--- a/project/src/native_audio/audio_system.h
++++ b/project/src/native_audio/audio_system.h
+@@ -28,6 +28,10 @@ class XHostThread;
+ namespace bf2audio {
+ using rex::X_STATUS;
+ 
++// The app is in the background (Android): no mixer callbacks until it is back, so the guest's audio waits instead of
++// mixing for nobody.
++void SetPaused(bool paused);
++
+ class NativeAudioSystem final : public rex::system::IAudioSystem {
+  public:
+   static constexpr uint32_t kMaxClients = 8;
 diff --git a/project/src/native_gpu/gpu_hooks.cpp b/project/src/native_gpu/gpu_hooks.cpp
-index a245717..1a1eb74 100644
+index a245717..9a5ccb5 100644
 --- a/project/src/native_gpu/gpu_hooks.cpp
 +++ b/project/src/native_gpu/gpu_hooks.cpp
 @@ -26,6 +26,7 @@
@@ -156,7 +191,15 @@ index a245717..1a1eb74 100644
  #include <cstdlib>
  #include <chrono>
  #include <deque>
-@@ -54,12 +55,12 @@ uint8_t* Mem() {
+@@ -37,6 +38,7 @@ constexpr uint32_t kInterruptHandler = 0x82482E80;  // D3D's VdSetGraphicsInterr
+ 
+ std::atomic<uint32_t> g_device{0};
+ std::atomic<bool> g_vblank_running{false};
++std::atomic<bool> g_vblank_paused{false};
+ std::mutex g_callback_mutex;
+ struct GpuCallback {
+   uint32_t function;
+@@ -54,12 +56,12 @@ uint8_t* Mem() {
  }
  uint32_t Load32(uint32_t a) {
    uint32_t v;
@@ -171,7 +214,27 @@ index a245717..1a1eb74 100644
  }
  
  void EnsureRenderer() {
-@@ -237,7 +238,7 @@ REX_HOOK_RAW(sub_8248AB00) {
+@@ -131,6 +133,11 @@ void StartInterruptThread() {
+         }
+       }
+       auto now = std::chrono::steady_clock::now();
++      if (g_vblank_paused.load()) {
++        next = now + period;
++        rex::thread::Sleep(std::chrono::milliseconds(50));
++        continue;
++      }
+       if (now >= next) {
+         next += period;
+         if (now - next > period * 4) next = now + period;
+@@ -158,6 +165,7 @@ void NativeGpuInstallMmio() {
+ }
+ 
+ void NativeGpuSetWindow(void* hwnd) { g_hwnd = hwnd; }
++void SetVblankPaused(bool paused) { g_vblank_paused = paused; }
+ 
+ }  // namespace bf2n
+ 
+@@ -237,7 +245,7 @@ REX_HOOK_RAW(sub_8248AB00) {
    imm.shader = shader;
    imm.declaration = declaration;
    imm.declaration_id = Load32(declaration + 32);
@@ -180,7 +243,7 @@ index a245717..1a1eb74 100644
    imm.code.assign(src, src + size);
    ++imm.generation;
    static std::atomic<int> logs{0};
-@@ -246,12 +247,42 @@ REX_HOOK_RAW(sub_8248AB00) {
+@@ -246,12 +254,42 @@ REX_HOOK_RAW(sub_8248AB00) {
                  size, start);
  }
  
@@ -223,7 +286,7 @@ index a245717..1a1eb74 100644
    __imp__sub_8247CBE0(ctx, base);
    EnsureRenderer();
    if (g_renderer_ready) bf2n::RendererDraw(device, prim, base_vertex, start, count, true);
-@@ -260,6 +291,7 @@ REX_HOOK_RAW(sub_8247CBE0) {
+@@ -260,6 +298,7 @@ REX_HOOK_RAW(sub_8247CBE0) {
  // sub_8247C9A0(device, prim, start_vertex, vertex_count): DrawVertices.
  REX_HOOK_RAW(sub_8247C9A0) {
    uint32_t device = ctx.r3.u32, prim = ctx.r4.u32, start = ctx.r5.u32, count = ctx.r6.u32;
@@ -231,7 +294,7 @@ index a245717..1a1eb74 100644
    __imp__sub_8247C9A0(ctx, base);
    EnsureRenderer();
    if (g_renderer_ready) bf2n::RendererDraw(device, prim, int32_t(start), 0, count, false);
-@@ -334,6 +366,7 @@ REX_HOOK_RAW(sub_82474310) {
+@@ -334,6 +373,7 @@ REX_HOOK_RAW(sub_82474310) {
    uint32_t device = ctx.r3.u32, count = ctx.r4.u32, rects = ctx.r5.u32, flags = ctx.r6.u32;
    uint32_t color = ctx.r7.u32, stencil = ctx.r9.u32;
    float z = float(ctx.f1.f64);
@@ -239,7 +302,7 @@ index a245717..1a1eb74 100644
    EnsureRenderer();
    if (g_renderer_ready) bf2n::RendererClear(device, count, rects, flags, color, z, stencil);
    __imp__sub_82474310(ctx, base);
-@@ -349,6 +382,7 @@ REX_HOOK_RAW(sub_82484E48) {
+@@ -349,6 +389,7 @@ REX_HOOK_RAW(sub_82484E48) {
    // Stack parameter slots are 8 bytes from r1+0x50; clear_z takes the 9th slot (float args also
    // consume a GPR slot), clear_stencil is the 10th (low word at +0x5C, see the caller 8234AE40).
    uint32_t stencil = Load32(ctx.r1.u32 + 0x5C);
@@ -247,7 +310,7 @@ index a245717..1a1eb74 100644
    EnsureRenderer();
    if (g_renderer_ready) {
      bf2n::RendererResolve(device, flags, rect, dest, point, level, slice, clear_color, z, stencil);
-@@ -364,6 +398,7 @@ void FrameTick();  // game_natives.cpp (BF2_NATIVE_AB)
+@@ -364,6 +405,7 @@ void FrameTick();  // game_natives.cpp (BF2_NATIVE_AB)
  REX_HOOK_RAW(sub_82472D10) {
    bf2_natives::FrameTick();
    uint32_t device = ctx.r3.u32, front = ctx.r4.u32;
@@ -255,6 +318,19 @@ index a245717..1a1eb74 100644
    EnsureRenderer();
    if (g_renderer_ready) bf2n::RendererSwap(device, front);
    __imp__sub_82472D10(ctx, base);
+diff --git a/project/src/native_gpu/native_gpu.h b/project/src/native_gpu/native_gpu.h
+index 9cd109c..4e848e4 100644
+--- a/project/src/native_gpu/native_gpu.h
++++ b/project/src/native_gpu/native_gpu.h
+@@ -70,6 +70,8 @@ void RendererResolve(uint32_t device, uint32_t flags, uint32_t src_rect, uint32_
+ void RendererSwap(uint32_t device, uint32_t front_texture);
+ // F12: trace and dump the next frame into captures/<time>/ next to the executable (any thread).
+ void RendererRequestCapture();
++// The app is in the background (Android): no vblank interrupts until it is back.
++void SetVblankPaused(bool paused);
+ 
+ // gpu_hooks.cpp
+ void NativeGpuInstallMmio();
 diff --git a/project/src/native_gpu/texture_copy.h b/project/src/native_gpu/texture_copy.h
 index 47f8765..6eed6a0 100644
 --- a/project/src/native_gpu/texture_copy.h

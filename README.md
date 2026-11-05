@@ -25,7 +25,7 @@ No game code or data is in this repository. You need your own Xbox 360 USA disc 
 | Vulkan 1.1 and 1.2 drivers, through VK_KHR_dynamic_rendering | path forced and run on the Mali-G57; no Adreno device tried yet |
 | Home screen, in-app game import from the disc image, settings with a fill-the-screen switch | done |
 | Touch controls for play | todo |
-| Split screen in the campaign | experimental, off by default, see below |
+| Leaving the app and coming back, in a mission too; saves | done, see below |
 | Windows test build | runs the same sources on a PC's Vulkan driver, see below |
 
 ## Layout
@@ -63,39 +63,22 @@ The app opens on a home screen. With no game installed it asks for the disc imag
 
 Settings is on the home screen and is saved in `user/settings.toml`. **Fill the screen** stretches the 16:9 picture to the whole display, which on a 20:9 phone widens it by about 25%. It is off by default, and it takes effect the next time the game starts. It doesn't widen the game's field of view.
 
-**Split screen (experimental)** shows two soldiers side by side in the campaign, and player 2 takes over a teammate.
+## In the background, and saves
 
-## Split screen
+Leaving the app (home button, another app, the screen off) holds the game still. Android takes the window away, and SDL blocks its main thread until it's back. An event watch in `app_main.cpp` then stops the audio mixer and the vblank interrupt, and the present thread holds the next frame, so the game thread stops in `BeginFrame`. On the way back the present thread makes a new Vulkan surface and swapchain for the new window, and the game carries on where it was. While the app is away the process uses about 20% of one core on the Mali phone, down from about 130%.
 
-The game has one human player: one controller object (`0x8284F7EC`) whose `+56` is the soldier it drives, and the camera, HUD and input follow that soldier. `split_screen.cpp` hands the controller to the other player's soldier on every update, through the end of the game's own hotswap, and the renderer keeps each frame for its side. The first pad drives player 1 and the second pad player 2, each with their own copy of the game's pad state. Each player gets half the frame rate. `user/split_script_player` (0 or 1) gives the scripted pad to one player, for tests without a second pad.
-
-Known problems:
-
-- In the test runs, with nobody playing player 2, a player's soldier was lost within seconds to a few minutes: no longer usable, probably dead, not confirmed. The next teammate takes over when the game offers one; until then the screen shows one player.
-- Both halves can show the same soldier for many seconds, after a teammate has been replaced among other times. Reading the side when the frame starts did not cure it, and the cause is unknown.
-- Controls feel half speed, as each player only gets every other update.
-- First-person guns don't draw while the two views differ, and flipping every 30 updates shows them stuck mid-raise. Skipping `sub_821A2418`, `sub_8262F730`, `sub_821A6E20` and `sub_821A62A0` during the hand-over did not bring them back.
-- These all come from handing one player back and forth, so this design is a proof of concept rather than a way to play.
-- Not tried: two real pads, what the audio does, the level end.
-
-### Spike: a real second player
-
-Setting `BF2_SPLIT2` as well as turning split screen on tries a design without hand-overs, on the Windows build (`split_screen.cpp`). The game thread fills a frame packet (`0x8287A4FC`: +2452 written, +2448 drawn) and hands it to the render thread in `sub_82347190`. Running `sub_82298D20` a second time with no time passing builds a second packet of the same moment for the other half, and game time stays real. The camera object is at `[0x8284F8D8]+48`: +304 projection, +432 view, +624 world. Once the first player has landed, a second controller from `sub_821C5928` takes over a teammate through `sub_8219A118`, and is updated believing it is the human player. Its pad is the guest's user 1: `SdlPadDriver` lists real devices so the second pad gets that number, and `pads/win_p2_walk.txt` with `run_windows.ps1 -Script2` stands in for it.
-
-Spawning a new soldier for player 2 doesn't work: `sub_8219B998` crashes in the soldier's constructor in the middle of a mission, and one spawned while the level loads fell through the ground and then crashed the game in `sub_821A0208`.
-
-What works, on this PC: both views with their own soldier, gun and HUD, at normal game time, for runs of about two minutes, and the second pad's stick and trigger reach the game's input state. It isn't playable: the second soldier doesn't walk or fire. About 96 functions read the human controller global, and the suspect is game code running outside the second controller's update that doesn't count that soldier as a player, not confirmed. The second view also borrows the first camera's rotation.
+The game saves on its own: its autosave writes progress and settings, and SAVE CAMPAIGN is in the campaign menu. It doesn't save during a mission. The SDK keeps saves under `user/<profile>/454107DB/` in the app's files, and the game finds them on the next start. Android can still kill a process that is in the background, which would lose the mission being played. While the game is away, `KeepAliveService` runs as a foreground service with a "Paused" notification. That moves the process from the cached class, which Android kills first, to perceptible (`oom_score_adj` 50), so it survives most memory pressure. The service stops when the game is back on screen.
 
 ## Windows test build
 
-`windows/CMakeLists.txt` builds the Android app's own sources (`android/app/src/main/cpp`) into `out/windows/bf2mc.exe`, so tests on a PC exercise the renderer and split screen the phone runs. It needs Visual Studio's C++ tools, LLVM in `C:\Program Files\LLVM` and the Android SDK's CMake and Ninja. Keep game files, the generated code and the build out of version control, as for Android.
+`windows/CMakeLists.txt` builds the Android app's own sources (`android/app/src/main/cpp`) into `out/windows/bf2mc.exe`, so tests on a PC exercise the renderer the phone runs. It needs Visual Studio's C++ tools, LLVM in `C:\Program Files\LLVM` and the Android SDK's CMake and Ninja. Keep game files, the generated code and the build out of version control, as for Android.
 
 ```powershell
 tools/build_windows.ps1
-tools/run_windows.ps1 -Name split -Seconds 120 -Script pads/win_split.txt -Split -ScriptPlayer 1 -Shots 70,90 -Debugger
+tools/run_windows.ps1 -Name mission -Seconds 120 -Script pads/win_mission.txt -Shots 70,90 -Debugger
 ```
 
-Results land in `out/runs/<Name>`. `-Debugger` runs it under cdb from the Windows SDK: `cdb.txt` has the stacks, named `sub_<guest address>`, and the guest registers of a crash. `-CdbExtra 'ba w4 0x18284FB00 "kn 14; g";'` logs every write to a guest address (guest memory starts at host `0x100000000`). `-Validate` asks for the Vulkan validation layer, which needs the Vulkan SDK installed.
+Results land in `out/runs/<Name>`. The scripted pad re-reads `out/windows/user/script.txt` when it grows, so lines appended while the game runs (`pads/win_menu.txt` stops at the title) drive it by hand. `REX_LOG_LEVEL=debug` logs the kernel calls, the XAM content ones among them. `-Debugger` runs it under cdb from the Windows SDK: `cdb.txt` has the stacks, named `sub_<guest address>`, and the guest registers of a crash. `-CdbExtra 'ba w4 0x18284FB00 "kn 14; g";'` logs every write to a guest address (guest memory starts at host `0x100000000`). `-Validate` asks for the Vulkan validation layer, which needs the Vulkan SDK installed.
 
 ## Device tiers
 
@@ -118,4 +101,5 @@ Files in the app's `files/user` folder switch these on: `gpu_times` (GPU time of
 - `harness/trace_hooks.cpp` (`BF2_TRACE=<s>`), `src/thread_dump.cpp` (`BF2_DUMP_AFTER=<s>`) and `tools/gen_calls.py` are how those two were found: debuggerd needs root on a release phone.
 - glslang ignores `[[vk::binding]]` under HLSL register mapping, and shifts a ByteAddressBuffer as a texture, not as a storage buffer. `tools/spv_bindings.py` prints where things landed.
 - The device takes 960 samples (3.75 of the game's frames) at a time. Asked for them in one burst, the game's mixer answers many with a frame of exact silence: about 40% of frames in the menus and the mission, whatever the frame rate. `audio_system.cpp` now keeps its callbacks about 5 ms apart, which leaves about 0.2%. `audio_log` reports how much the output starved.
+- The SDK's timer queue, which fires the guest's kernel timers, waited with disruptorplus's spin wait: spinning, yielding and 1 ms naps, about 20% of a core on the Mali phone even with nothing due. `patches/sdk-0002-timer-queue-wait.patch` waits on a condition variable instead. disruptorplus's own blocking strategy can't be used, because it passes `wait_until`'s arguments in the wrong order.
 - `build_harness.ps1` leaves `$ErrorActionPreference` alone: CMake writes warnings to stderr, and `Stop` turns them into failures.

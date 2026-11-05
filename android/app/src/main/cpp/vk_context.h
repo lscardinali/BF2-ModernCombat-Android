@@ -4,8 +4,11 @@
 // which is what older Adreno drivers report.
 #include <vulkan/vulkan.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 struct SDL_Window;
@@ -78,12 +81,22 @@ public:
     VkCommandBuffer BeginOneTime();
     void EndOneTime(VkCommandBuffer cmd);
     void WaitIdle();
+    // The app went to the background (main thread): the present thread holds the next frame until Resume, which also
+    // has it make a new surface for the window Android hands back.
+    void Pause();
+    void Resume();
 
     uint32_t MemoryType(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags fallback = 0) const;
 
 private:
     SDL_Window* window_ = nullptr;
     bool acquired_ = false;
+    bool CreateSurface();
+    bool ReadyToPresent();
+    std::mutex pause_mutex_;
+    std::condition_variable pause_cv_;
+    bool paused_ = false;
+    std::atomic<bool> surface_stale_{false};
 };
 
 Context& Get();

@@ -11,6 +11,9 @@
     <!-- the kernel's XNet opens sockets at boot -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- KeepAliveService: keeps a game in the background from being the first process killed -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
         android:allowBackup="false"
@@ -49,6 +52,14 @@
             android:launchMode="singleTask"
             android:preferMinimalPostProcessing="true"
             android:screenOrientation="sensorLandscape" />
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps a paused game session in memory until the player returns to it" />
+        </service>
     </application>
 
 </manifest>

@@ -1,25 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- the launcher icon: a sight reticle, inside the adaptive icon's 66 dp safe zone. Also the monochrome icon. -->
+<!-- the launcher icon: "BF" in block letters with a drop shadow, inside the adaptive icon's 66 dp safe zone -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- ring -->
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M54,36a18,18 0,1 1,0 36a18,18 0,1 1,0 -36z"
-        android:strokeWidth="3"
-        android:strokeColor="#FFD9D2A6" />
-    <!-- ticks through the ring -->
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M54,27v13M54,68v13M27,54h13M68,54h13"
-        android:strokeLineCap="square"
-        android:strokeWidth="3"
-        android:strokeColor="#FFD9D2A6" />
-    <!-- centre dot -->
-    <path
-        android:fillColor="#FFC8E05A"
-        android:pathData="M54,51.5a2.5,2.5 0,1 1,0 5a2.5,2.5 0,1 1,0 -5z" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="1.1"
+        android:scaleY="1.1">
+        <group
+            android:translateX="1.6"
+            android:translateY="1.6">
+            <path
+                android:fillColor="#FF7A2A05"
+                android:fillType="evenOdd"
+                android:pathData="M31,37H43A8,8 0 0 1 43,53H44A9,9 0 0 1 44,71H31ZM37,42H43A3,3 0 0 1 43,48H37ZM37,58H44A4,4 0 0 1 44,66H37ZM57,37H77V43H63V51H74V57H63V71H57Z" />
+        </group>
+        <path
+            android:fillColor="#FFFFF3DF"
+            android:fillType="evenOdd"
+            android:pathData="M31,37H43A8,8 0 0 1 43,53H44A9,9 0 0 1 44,71H31ZM37,42H43A3,3 0 0 1 43,48H37ZM37,58H44A4,4 0 0 1 44,66H37ZM57,37H77V43H63V51H74V57H63V71H57Z" />
+    </group>
 </vector>

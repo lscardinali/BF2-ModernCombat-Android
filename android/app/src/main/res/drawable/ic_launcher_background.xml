@@ -1,11 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- the launcher icon's ground: dark olive -->
+<!-- the launcher icon's ground: an orange gradient, with a darker band across the lower part -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108"
+                android:startColor="#FFF5A03A"
+                android:endColor="#FFC2410C" />
+        </aapt:attr>
+    </path>
     <path
-        android:fillColor="#FF2B3520"
-        android:pathData="M0,0h108v108h-108z" />
+        android:fillColor="#1F000000"
+        android:pathData="M0,80L108,62V108H0Z" />
 </vector>
